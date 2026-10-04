@@ -138,15 +138,23 @@ def test_unlined_export_worker_is_replaced_by_physical_fast_path():
     assert "infer_dictionary_page_layout" in resolver_source
 
 
-def test_launcher_and_spawn_worker_seed_layout_rows_for_future_qa():
+def test_gui_and_worker_composition_seed_layout_rows_for_future_qa():
     root = Path(__file__).resolve().parents[1]
-    launcher = (root / "src" / "picture_capture" / "launcher.py").read_text(encoding="utf-8")
-    spawn = (root / "src" / "picture_capture" / "spawn_detection_runtime.py").read_text(encoding="utf-8")
+    gui = (
+        root / "src" / "picture_capture" / "bootstrap" / "gui.py"
+    ).read_text(encoding="utf-8")
+    worker = (
+        root / "src" / "picture_capture" / "bootstrap" / "worker.py"
+    ).read_text(encoding="utf-8")
+    spawn = (
+        root / "src" / "picture_capture" / "spawn_detection_runtime.py"
+    ).read_text(encoding="utf-8")
 
-    assert "install_layout_rows_persistence_runtime()" in launcher
-    assert "install_unlined_fast_path()" in launcher
-    assert launcher.index("install_unlined_fast_path()") < launcher.index(
+    assert "install_layout_rows_persistence_runtime()" in gui
+    assert "install_unlined_fast_path()" in gui
+    assert gui.index("install_unlined_fast_path()") < gui.index(
         "install_unlined_line_export_ui(app_module)"
     )
-    assert "with capture_layout_rows(" in spawn
-    assert "install_layout_rows_persistence_runtime()" in spawn
+    assert "install_layout_rows_persistence_runtime()" in worker
+    assert "with services.capture_layout_rows(" in spawn
+    assert "install_layout_rows_persistence_runtime()" not in spawn

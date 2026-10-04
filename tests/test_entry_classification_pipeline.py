@@ -158,19 +158,41 @@ def test_review_and_marker_ocr_are_wired_to_canonical_classification():
     assert '("自动", "普通词条", "大字头")' in review_source
 
 
-def test_launcher_installs_classification_before_app_and_review_ui_after_app():
-    import picture_capture.launcher as launcher
+def test_gui_composition_installs_classification_before_app_and_review_ui_after_app():
+    import picture_capture.bootstrap.gui as gui_bootstrap
 
-    source = Path(launcher.__file__).read_text(encoding="utf-8")
+    source = Path(gui_bootstrap.__file__).read_text(encoding="utf-8")
     assert "install_pdic_classification(formats)" in source
     assert "install_processing_entry_classification(processing_module)" in source
     assert "install_review_entry_classification(app_module)" in source
+    assert source.index("install_processing_entry_classification(processing_module)") < source.index(
+        "from .. import app as app_module"
+    )
+    assert source.index("from .. import app as app_module") < source.index(
+        "install_review_entry_classification(app_module)"
+    )
 
 
-def test_package_installs_pdic_classification_for_non_gui_consumers():
+def test_core_composition_installs_classification_for_non_gui_consumers():
     import picture_capture
+    from picture_capture import formats, processing
+    from picture_capture.bootstrap.core import build_core_services
 
-    source = Path(picture_capture.__file__).read_text(encoding="utf-8")
-    assert "install_entry_crop_settings()" in source
-    assert "install_entry_classification_fields()" in source
-    assert "install_pdic_classification(_formats)" in source
+    build_core_services()
+    package_source = Path(picture_capture.__file__).read_text(encoding="utf-8")
+    core_source = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "picture_capture"
+        / "bootstrap"
+        / "core.py"
+    ).read_text(encoding="utf-8")
+
+    assert "install_entry_crop_settings()" not in package_source
+    assert "install_entry_classification_fields()" not in package_source
+    assert "install_pdic_classification(_formats)" not in package_source
+    assert "install_entry_crop_settings()" in core_source
+    assert "install_entry_classification_fields()" in core_source
+    assert "install_pdic_classification(formats)" in core_source
+    assert bool(getattr(formats, "_entry_classification_installed", False))
+    assert bool(getattr(processing, "_entry_classification_runtime_installed", False))

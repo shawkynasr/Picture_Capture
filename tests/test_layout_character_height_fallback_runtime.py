@@ -76,23 +76,24 @@ def test_runtime_is_installed_before_any_page_layout_import_can_capture_detector
 
     root = Path(__file__).resolve().parents[1]
     package_init = (root / "src/picture_capture/__init__.py").read_text(encoding="utf-8")
-    launcher = (root / "src/picture_capture/launcher.py").read_text(encoding="utf-8")
-    spawn = (root / "src/picture_capture/spawn_detection_runtime.py").read_text(encoding="utf-8")
+    core = (root / "src/picture_capture/bootstrap/core.py").read_text(encoding="utf-8")
+    gui = (root / "src/picture_capture/bootstrap/gui.py").read_text(encoding="utf-8")
+    worker = (root / "src/picture_capture/bootstrap/worker.py").read_text(encoding="utf-8")
 
-    # This is the crucial process-wide ordering rule. Importing the package runs
-    # __init__.py before launcher/main or any spawn target body. __init__ itself
-    # imports processing, which imports Page Understanding and the policy module
-    # that binds detect_layout_parameters by value.
-    assert package_init.index("install_character_height_fallback_runtime()") < package_init.index(
-        "from . import processing as _processing"
+    # Bare package import must no longer perform any runtime installation.
+    assert "install_character_height_fallback_runtime()" not in package_init
+    assert "processing" not in package_init
+
+    # The explicit shared core owns the import-sensitive ordering and must
+    # establish character-height recovery before importing processing.
+    assert core.index("install_character_height_fallback_runtime()") < core.index(
+        "from .. import processing as processing_module"
     )
 
-    # Keep the more local guards too: they document the same contract for users
-    # of launcher and for the spawn job body even though package init now makes
-    # the process-level ordering safe first.
-    assert launcher.index("install_character_height_fallback_runtime()") < launcher.index(
-        "from . import dictionary_page_design"
+    # GUI retains its local idempotent ordering guard while worker delegates that
+    # responsibility to core before installing worker-specific extensions.
+    assert gui.index("install_character_height_fallback_runtime()") < gui.index(
+        "from .. import dictionary_page_design"
     )
-    assert spawn.index("install_character_height_fallback_runtime()") < spawn.index(
-        "from . import processing as processing_module"
-    )
+    assert "core_services = build_core_services()" in worker
+    assert "install_character_height_fallback_runtime()" not in worker

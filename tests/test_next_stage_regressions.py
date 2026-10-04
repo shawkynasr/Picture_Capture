@@ -1086,29 +1086,36 @@ def test_secondary_windows_share_modern_shell_without_changing_review_window():
     assert 'text="环境中心"' in settings
 
     review_start = source.index("class ReviewWindow")
-    review_end = source.index("class OCRConflictReviewDialog", review_start)
+    review_end = source.index("class PictureCaptureApp", review_start)
     review = source[review_start:review_end]
     assert '_build_modern_dialog_heading(' not in review
 
-    conflict_start = source.index("class OCRConflictReviewDialog")
-    conflict_end = source.index("class CropSettingsDialog", conflict_start)
-    conflict = source[conflict_start:conflict_end]
+    conflict_source = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "picture_capture" / "ui" / "dialogs" / "ocr_conflict.py"
+    ).read_text(encoding="utf-8")
+    conflict_start = conflict_source.index("class OCRConflictReviewDialog")
+    conflict = conflict_source[conflict_start:]
     assert '"OCR 词头冲突复核"' in conflict
     assert 'text="所选候选"' in conflict
     assert 'text="关闭"' in conflict
 
-    crop_start = source.index("class CropSettingsDialog")
-    crop_end = source.index("class OldNewComparisonWindow", crop_start)
-    crop = source[crop_start:crop_end]
+    crop = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "picture_capture" / "ui" / "dialogs" / "crop_settings.py"
+    ).read_text(encoding="utf-8")
     assert '"通用切图规则"' in crop
     assert '"特殊页面范围"' in crop
     assert '主界面【六、页面列表】的 Section 列双击设置' in crop
     assert '"特殊页面覆盖"' not in crop
     assert 'text="保存并关闭"' in crop
 
-    compare_start = source.index("class OldNewComparisonWindow")
-    compare_end = source.index("class PictureCaptureApp", compare_start)
-    compare = source[compare_start:compare_end]
+    compare_source = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "picture_capture" / "ui" / "dialogs" / "old_new_comparison.py"
+    ).read_text(encoding="utf-8")
+    compare_start = compare_source.index("class OldNewComparisonWindow")
+    compare = compare_source[compare_start:]
     assert '"新旧比较"' in compare
     assert 'text="比较来源"' in compare
     assert 'text="比较摘要"' in compare
@@ -1122,29 +1129,37 @@ def test_settings_center_uses_context_help_units_and_user_facing_modes():
     start = text.index("class SettingsDialog")
     end = text.index("class ReviewWindow", start)
     settings = text[start:end]
+    schema = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "picture_capture" / "ui" / "settings" / "schema.py"
+    ).read_text(encoding="utf-8")
+    help_source = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "picture_capture" / "ui" / "settings" / "help.py"
+    ).read_text(encoding="utf-8")
 
-    assert '"bottom_y", int' in settings
-    assert '"bottom_y": "正文结束 Y"' in settings
-    common_start = settings.index("    COMMON_FIELDS = (")
-    common_end = settings.index("\n    NORMAL_COMMON_FIELDS", common_start)
-    common_fields = settings[common_start:common_end]
+    assert '"bottom_y", int' in schema
+    assert '"bottom_y": "正文结束 Y"' in schema
+    common_start = schema.index("COMMON_FIELDS = (")
+    common_end = schema.index("\nNORMAL_COMMON_FIELDS", common_start)
+    common_fields = schema[common_start:common_end]
     assert '"bottom_y"' not in common_fields
-    assert '"columns": "正文栏数"' in settings
-    assert '"manual_x": "第一栏左缘 X"' in settings
-    assert '"start_y": "% 图高"' in settings
-    assert '"manual_x": "% 图宽"' in settings
-    assert '"column_width": "% 图宽"' in settings
-    assert '"character_height": "% 图高"' in settings
-    assert '"paddle_band_width_ratio": "%"' in settings
-    assert '"paddle_left_tolerance": "% 单栏宽"' in settings
-    assert '"analysis_left": "% 图宽"' in settings
-    assert '"analysis_right": "% 图宽"' in settings
-    assert '"paddle_header_search_height": "% 图高"' in settings
-    assert '"paddle_separator_safety_px": "原图px"' in settings
-    assert '"column_track_radius": "% 单栏宽"' in settings
-    assert '"column_track_block_height": "% 正文高度"' in settings
-    assert '"column_track_max_step": "% 分块高度"' in settings
-    assert '"columns": (1, 12, 1)' in settings
+    assert '"columns": "正文栏数"' in schema
+    assert '"manual_x": "第一栏左缘 X"' in schema
+    assert '"start_y": "% 图高"' in schema
+    assert '"manual_x": "% 图宽"' in schema
+    assert '"column_width": "% 图宽"' in schema
+    assert '"character_height": "% 图高"' in schema
+    assert '"paddle_band_width_ratio": "%"' in schema
+    assert '"paddle_left_tolerance": "% 单栏宽"' in schema
+    assert '"analysis_left": "% 图宽"' in schema
+    assert '"analysis_right": "% 图宽"' in schema
+    assert '"paddle_header_search_height": "% 图高"' in schema
+    assert '"paddle_separator_safety_px": "原图px"' in schema
+    assert '"column_track_radius": "% 单栏宽"' in schema
+    assert '"column_track_block_height": "% 正文高度"' in schema
+    assert '"column_track_max_step": "% 分块高度"' in schema
+    assert '"columns": (1, 12, 1)' in schema
     percent_float_fields = (
         "start_y", "manual_x", "column_width", "gutter", "body_indent",
         "character_height", "row_padding", "horizontal_tolerance",
@@ -1155,24 +1170,24 @@ def test_settings_center_uses_context_help_units_and_user_facing_modes():
         "right_ratio", "review_zoom_percent",
     )
     for name in percent_float_fields:
-        assert f'"{name}", float' in settings, name
+        assert f'"{name}", float' in schema, name
     assert "def _show_setting_help(" in settings
     assert 'text="设置说明"' in settings
-    assert "程序取第 1 个捕获组作为原始词头" in settings
-    assert "实际 POS 正则由 Profile 的 pos_labels 动态生成" in settings
-    assert "可作为新词条起始证据" in settings
-    assert "命中只增加一项结构证据，不会无条件把该行接受为词头" in settings
+    assert "程序取第 1 个捕获组作为原始词头" in schema
+    assert "实际 POS 正则由 Profile 的 pos_labels 动态生成" in schema
+    assert "可作为新词条起始证据" in schema
+    assert "命中只增加一项结构证据，不会无条件把该行接受为词头" in schema
     assert 'text="ⓘ"' in settings
     assert 'panes = ttk.Panedwindow(host, orient="horizontal")' in settings
     assert 'panes.add(left, weight=3)' in settings
     assert 'panes.add(right, weight=2)' in settings
     assert 'panes.sashpos(0, int(width * 0.60))' in settings
     assert "def _bind_responsive_labels(" in settings
-    assert "label_width = int(label.winfo_width())" in settings
-    assert "available = max(48, label_width - 12)" in settings
-    assert "_wrap_mixed_ui_text(" in settings
-    assert "label.configure(text=rendered, wraplength=0)" in settings
-    assert "label._pc_dynamic_textvariable = bool(textvariable)" in settings
+    assert "label_width = int(label.winfo_width())" in help_source
+    assert "available = max(48, label_width - 12)" in help_source
+    assert "_wrap_mixed_ui_text(" in help_source
+    assert "label.configure(text=rendered, wraplength=0)" in help_source
+    assert "label._pc_dynamic_textvariable = bool(textvariable)" in help_source
     assert "control.columnconfigure(0, weight=1)" in settings
     assert 'widget.grid(row=0, column=0, sticky="ew")' in settings
     assert "wraplength=0 if single_line_labels else 180" in settings
@@ -1274,19 +1289,22 @@ def test_common_layout_settings_show_packaged_context_diagrams():
     start = app_text.index("class SettingsDialog")
     end = app_text.index("class ReviewWindow", start)
     settings = app_text[start:end]
+    schema = (root / "src" / "picture_capture" / "ui" / "settings" / "schema.py").read_text(encoding="utf-8")
+    help_source = (root / "src" / "picture_capture" / "ui" / "settings" / "help.py").read_text(encoding="utf-8")
 
-    assert '"columns": "layout_col_number.png"' in settings
+    assert '"columns": "layout_col_number.png"' in schema
     for field in (
         "start_y", "bottom_y", "manual_x", "column_width",
         "gutter", "character_height", "row_padding",
     ):
-        assert f'"{field}": "layout_settings.png"' in settings
+        assert f'"{field}": "layout_settings.png"' in schema
     assert "help_images=True" in settings
     assert "show_layout_image: bool = False" in settings
-    assert '/ "data"' in settings
-    assert '/ "layout_example"' in settings
-    assert "Image.Resampling.LANCZOS" in settings
-    assert "ImageTk.PhotoImage(themed_display_image(rendered, self.parent.appearance_mode))" in settings
+    assert '/ "data"' in help_source
+    assert '/ "layout_example"' in help_source
+    assert "Image.Resampling.LANCZOS" in help_source
+    assert "ImageTk.PhotoImage(" in help_source
+    assert "themed_display_image(rendered, dialog.parent.appearance_mode)" in help_source
 
     layout_dir = root / "src" / "picture_capture" / "data" / "layout_example"
     assert (layout_dir / "layout_col_number.png").is_file()
@@ -1445,16 +1463,19 @@ def test_mixed_ui_wrap_measures_tokens_incrementally_not_growing_prefixes():
 
 
 def test_usage_guide_is_modern_task_oriented_and_centered():
-    source = Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "app.py"
-    text = source.read_text(encoding="utf-8")
+    root = Path(__file__).resolve().parents[1]
+    app_source = root / "src" / "picture_capture" / "app.py"
+    guide_source = root / "src" / "picture_capture" / "ui" / "dialogs" / "usage_guide.py"
+    text = app_source.read_text(encoding="utf-8")
+    guide_text = guide_source.read_text(encoding="utf-8")
 
-    guide_start = text.index("class UsageGuideWindow(tk.Toplevel):")
-    guide_end = text.index("class SettingsDialog(tk.Toplevel):", guide_start)
-    guide = text[guide_start:guide_end]
+    guide_start = guide_text.index("class UsageGuideWindow(tk.Toplevel):")
+    guide_end = len(guide_text)
+    guide = guide_text[guide_start:guide_end]
 
     assert '"快速开始"' in guide
     assert 'self.title("Picture Capture · 帮助中心")' in guide
-    assert "work_x, work_y, work_w, work_h = _screen_work_area(self)" in guide
+    assert "work_x, work_y, work_w, work_h = screen_work_area(self)" in guide
     assert "x = work_x + max(0, (work_w - width) // 2)" in guide
     assert "y = work_y + max(0, (work_h - height) // 2)" in guide
     assert 'self.geometry(f"{width}x{height}+{x}+{y}")' in guide
@@ -2382,6 +2403,7 @@ def test_layout_percentage_helpers_preserve_pixel_backend_contract():
 
     source = Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "app.py"
     text = source.read_text(encoding="utf-8")
+    schema = (Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "ui" / "settings" / "schema.py").read_text(encoding="utf-8")
     assert '"start_y": "height"' in text
     assert '"manual_x": "width"' in text
     assert '"body_indent": "width"' in text
@@ -2404,8 +2426,8 @@ def test_layout_percentage_helpers_preserve_pixel_backend_contract():
     detect = text[detect_start:detect_end]
     assert 'numeric_summary="mean"' not in detect
     assert "多页数值参数将取稳健中位数" in detect
-    assert '"start_y": "% 图高"' in text
-    assert '"manual_x": "% 图宽"' in text
+    assert '"start_y": "% 图高"' in schema
+    assert '"manual_x": "% 图宽"' in schema
     assert "def _quick_percent_parameter_changed(self, name: str)" in text
     assert "def _quick_pixel_parameter_changed(self, name: str)" in text
     assert 'self._quick_geometry_edit_source[name] = "pixel"' in text
@@ -3360,12 +3382,15 @@ def test_project_profile_wizard_is_the_normal_entry_path():
 
 
 def test_main_ocr_drawing_defaults_to_cache_reuse_and_paddle_only():
-    app_source = Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "app.py"
-    app_text = app_source.read_text(encoding="utf-8")
+    root = Path(__file__).resolve().parents[1]
+    app_text = (root / "src" / "picture_capture" / "app.py").read_text(encoding="utf-8")
+    guide_text = (
+        root / "src" / "picture_capture" / "ui" / "dialogs" / "usage_guide.py"
+    ).read_text(encoding="utf-8")
     assert 'self.ocr_refresh_var = tk.StringVar(value="reuse")' in app_text
     assert "使用有效缓存（推荐）" in app_text
     assert "重新OCR（模型/图像改变时）" in app_text
-    assert "默认只启用 PaddleOCR；Tesseract 与 Google Lens 按需手动开启" in app_text
+    assert "默认只启用 PaddleOCR；Tesseract 与 Google Lens 按需手动开启" in guide_text
     assert 'LENS_MODE_LABELS["off"]' in app_text
 
     settings = AppSettings()
@@ -3492,13 +3517,14 @@ def test_ordinary_only_controls_stay_out_of_main_layout_section():
         / "src" / "picture_capture" / "app.py"
     ).read_text(encoding="utf-8")
 
-    settings_start = source.index("class SettingsDialog")
-    settings_end = source.index("class ReviewWindow", settings_start)
-    settings_text = source[settings_start:settings_end]
+    schema = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "picture_capture" / "ui" / "settings" / "schema.py"
+    ).read_text(encoding="utf-8")
 
-    normal_checks_start = settings_text.index("    NORMAL_CHECKS = (")
-    normal_checks_end = settings_text.index("    OCR_COMMON_CHECKS = (", normal_checks_start)
-    normal_checks = settings_text[normal_checks_start:normal_checks_end]
+    normal_checks_start = schema.index("NORMAL_CHECKS = (")
+    normal_checks_end = schema.index("OCR_COMMON_CHECKS = (", normal_checks_start)
+    normal_checks = schema[normal_checks_start:normal_checks_end]
     assert '("自动精修横线 Y", "paddle_refine_separator_y")' in normal_checks
     assert '("使用自动版面参数", "ordinary_auto_layout")' in normal_checks
 
@@ -3692,17 +3718,17 @@ def test_ordinary_auto_layout_applies_only_checked_page_specific_fields(monkeypa
 
 
 def test_restored_vb_controls_are_exposed_separately_from_modern_right_ratio():
-    app_source = (
+    schema_source = (
         Path(__file__).resolve().parents[1]
-        / "src" / "picture_capture" / "app.py"
+        / "src" / "picture_capture" / "ui" / "settings" / "schema.py"
     ).read_text(encoding="utf-8")
-    assert '("向右比例 %", "right_ratio", float)' in app_source
-    assert '("VB 向右比例 1/x", "ordinary_right_divisor", float)' in app_source
+    assert '("向右比例 %", "right_ratio", float)' in schema_source
+    assert '("VB 向右比例 1/x", "ordinary_right_divisor", float)' in schema_source
     for name in (
         "white_threshold_high", "white_threshold_low", "whitespace_adjustment",
         "upward_ratio", "analysis_left", "analysis_right",
     ):
-        assert name in app_source
+        assert name in schema_source
 
 
 def test_ordinary_micro_tolerance_is_not_clipped_by_body_indent():
@@ -4045,7 +4071,7 @@ def test_round2_heavy_finalizers_and_review_crops_stay_off_tk():
     assert "statistics.fmean(" not in ui_finalized
 
     review_start = app_text.index("class ReviewWindow")
-    review_end = app_text.index("class OCRConflictReviewDialog", review_start)
+    review_end = app_text.index("class PictureCaptureApp", review_start)
     review = app_text[review_start:review_end]
     request_start = review.index("    def _request_render_rows(")
     render_start = review.index("    def render_rows(", request_start)
@@ -4111,7 +4137,7 @@ def test_round3_long_tail_ui_paths_are_backgrounded_and_snapshotted():
     assert "self.parent._request_wordslist_reload(persist=False, redraw=False)" in settings
 
     review_start = text.index("class ReviewWindow")
-    review_end = text.index("class OCRConflictReviewDialog", review_start)
+    review_end = text.index("class PictureCaptureApp", review_start)
     review = text[review_start:review_end]
     assert "self.parent._request_wordslist_reload(" in review
     assert "reload_wordslist_reference(Path(chosen)" not in review
@@ -4272,7 +4298,7 @@ def test_focused_filter_streams_complete_batches_and_prefetches_next_batch():
     root = Path(__file__).resolve().parents[1]
     app = (root / "src" / "picture_capture" / "app.py").read_text(encoding="utf-8")
     review_start = app.index("class ReviewWindow")
-    review_end = app.index("class OCRConflictReviewDialog", review_start)
+    review_end = app.index("class PictureCaptureApp", review_start)
     review = app[review_start:review_end]
 
     focused_start = review.index("    def run_focused_filter(")
@@ -5628,6 +5654,10 @@ def test_paddle_temp_page_match_uses_stem_boundaries():
 def test_settings_center_avoids_full_hidden_tab_idle_layout_cascade():
     source = Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "app.py"
     text = source.read_text(encoding="utf-8")
+    help_source = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "picture_capture" / "ui" / "settings" / "help.py"
+    ).read_text(encoding="utf-8")
     start = text.index('    def __init__(self, parent: "PictureCaptureApp", initial_tab: str | None = None) -> None:')
     end = text.index("    @staticmethod\n    def _crop_nonnegative_int", start)
     block = text[start:end]
@@ -5640,17 +5670,19 @@ def test_settings_center_avoids_full_hidden_tab_idle_layout_cascade():
     assert "content.bind(" in text
     assert 'cv.configure(scrollregion=cv.bbox("all"))' in text
     assert "每个参数下方已直接显示详细说明" in text
-    assert 'pending["job"] = self.after(80, refresh)' in text
-    assert 'pending["job"] = self.after_idle(refresh)' not in text
+    assert 'pending["job"] = dialog.after(80, refresh)' in help_source
+    assert 'pending["job"] = dialog.after_idle(refresh)' not in help_source
 
 
 
 def test_responsive_help_wrapping_does_not_self_trigger_on_label_configure():
-    source = Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "app.py"
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "picture_capture" / "ui" / "settings" / "help.py"
+    )
     text = source.read_text(encoding="utf-8")
-    start = text.index("    def _bind_responsive_labels(")
-    end = text.index("    def _setting_var(", start)
-    block = text[start:end]
+    start = text.index("def bind_responsive_labels(")
+    block = text[start:]
     assert 'container.bind("<Configure>", schedule, add="+")' in block
     assert 'label.bind("<Configure>", schedule, add="+")' not in block
     assert "_pc_wrap_cache_key" in block
