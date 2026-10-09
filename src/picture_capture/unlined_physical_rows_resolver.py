@@ -58,19 +58,15 @@ def resolve_unlined_physical_rows(
             pass
         return fast, "fast_projection"
 
-    # Escalate geometry only.  These installers are required because an unlined
-    # worker is spawned independently of the GUI launcher on Windows/macOS.
-    from .layout_character_height_runtime import install_character_height_fallback_runtime
-    from .layout_column_drift_runtime import install_layout_column_drift_runtime
+    # Escalate geometry only. Character-height fallback and column-drift
+    # remeasurement are static; the remaining installers are still required
+    # because an unlined worker is spawned independently of the GUI launcher.
     from .layout_line_start_refinement import install_robust_line_starts
     from .layout_physical_indent import install_physical_indent_inference
-    from .layout_row_recovery_runtime import install_layout_row_recovery_runtime
 
-    install_character_height_fallback_runtime()
     install_robust_line_starts()
     install_physical_indent_inference()
-    install_layout_row_recovery_runtime()
-    install_layout_column_drift_runtime()
+    # Long-band row recovery is already static in layout_physical_indent.
 
     # Import only after the runtime order above.  This path may use the reliable
     # page detector to correct a translated/abnormal page, but it stops before

@@ -5,7 +5,6 @@ from dataclasses import replace
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 import bisect
 import csv
-import difflib
 import os
 import queue
 import threading
@@ -23,7 +22,7 @@ import webbrowser
 import tkinter as tk
 from tkinter import colorchooser, filedialog, font, messagebox, simpledialog, ttk
 
-from PIL import Image, ImageOps, ImageTk
+from PIL import Image, ImageTk
 
 from . import __version__
 from .appearance import (
@@ -36,10 +35,72 @@ from .appearance import (
     themed_display_image,
     usage_guide_palette,
 )
-from .formats import pdic_path, read_pdic, read_ppp, write_pdic, write_ppp, write_text_atomic, read_picdic_index_records
+from .gui_io import pdic_path, read_pdic, read_ppp, write_pdic, write_ppp, write_text_atomic
+from .ocr_action_guard import LENS_MODE_LABELS, LENS_MODE_VALUES, guard_ocr_action_selection
 from .models import (
     AppSettings, Entry as WordEntry, PolygonRegion, ProjectState, project_page_images,
-    natural_text_key, read_noncomment_lines, resolve_wordslist_path, resolved_tesseract_language,
+    read_noncomment_lines, resolve_wordslist_path, resolved_tesseract_language,
+)
+from .pdic_restore import (
+    build_page_lookup as _build_words_page_lookup,
+    parse_merged_pdic_text as _parse_merged_pdic_text,
+    resolve_page_token as _resolve_words_page_token,
+    write_pdic_atomic as _write_pdic_atomic,
+)
+
+from .page_word_mapping import (
+    _compare_page_word_mappings,
+    _compare_page_word_sequences,
+    _fill_page_entries,
+    _page_word_mapping_text,
+    _parse_words_of_pages_text,
+)
+
+from .review_text_helpers import (
+    _candidate_choice_rows,
+    _candidate_for_entry_from_list,
+    _candidate_word_for_ocr_source,
+    _entry_font_spec,
+    _focused_review_character_tokens,
+    _focused_review_is_single_character,
+    _focused_review_page_indices,
+    _review_editor_font_size,
+    _review_similarity_color,
+    _review_similarity_key,
+    _review_text_similarity,
+)
+
+from .layout_percent_helpers import (
+    LAYOUT_PERCENT_AXES,
+    _column_percent_to_pixels,
+    _column_pixels_to_percent,
+    _format_layout_percent,
+    _format_review_height_percent,
+    _layout_percent_denominator,
+    _layout_percent_to_pixels,
+    _layout_pixels_to_percent,
+    _review_height_percent_to_pixels,
+    _review_height_pixels_to_percent,
+)
+
+from .page_list_helpers import (
+    _fill_status_cell_style,
+    _natural_text_key,
+    _sorted_page_list_rows,
+)
+
+from .overlay_layout_helpers import (
+    binary_preview_image,
+    effective_main_overlay_font_size,
+    entry_index_label_layout,
+    horizontal_ocr_menu_layout,
+    horizontal_overlay_layout,
+    review_auto_fit_zoom,
+    scaled_overlay_line_width,
+    transformed_entry_anchor,
+    vertical_marker_contact_gap,
+    vertical_ocr_menu_layout,
+    vertical_overlay_layout,
 )
 from .paddle_headwords import (
     DEFAULT_HEADWORD_FILTER_RULES,
@@ -56,6 +117,17 @@ from .ui_compat import (
 from .ui.widgets.vertical_word import VerticalWordText
 from .ui.settings import schema as _settings_schema
 from .ui.settings import help as _settings_help_ui
+from .ui.settings import profile as _settings_profile_ui
+from .ui.settings import rules as _settings_rules_ui
+from .ui.settings import lifecycle as _settings_lifecycle_ui
+from .ui.settings import window as _settings_window_ui
+from .ui.settings import crop as _settings_crop_ui
+from .ui.settings import project as _settings_project_ui
+from .ui.controllers import (
+    CanvasController, CropController, DetectionController, ExportController,
+    HeadwordController, IllustrationController, PageController, ProjectController,
+    ReviewController, SESSION_STATE_FILENAME, SessionController,
+)
 from .ui.text_wrap import (
     _label_measure, _mixed_ui_wrap_tokens, _normalize_ui_paragraphs,
     _wrap_mixed_ui_text,
@@ -83,11 +155,10 @@ from .dictionary_profile import (
     language_effective_settings, managed_profile_setting_names, profile_effective_settings,
     profile_layout_summary, write_project_profile,
 )
-from .profile_setup import ProjectProfileWizard, _screen_work_area
+from .profile_wizard import ProjectProfileWizard, _screen_work_area
 from .profile_semantics import (
     effective_page_settings, entry_allowed_by_page_template, page_template_analysis_image,
 )
-from .picdic import PicDicBuildCancelled, build_picdic_package
 from .image_utils import normalize_page_rgb
 from .image_preprocessing import (
     PreprocessAnalysis,
@@ -130,6 +201,30 @@ from .training_export import (
     make_training_zip, write_training_manifest,
 )
 from .text_encoding import read_text_detected
+from .unicode_nonbmp_input import (
+    attach_nonbmp_unicode_input, close_nonbmp_unicode_input,
+)
+from .overlay_opacity import (
+    add_quick_opacity_control, clear_alpha_line_photos,
+    create_alpha_canvas_line, release_alpha_line_photos,
+)
+from .illustration_fill_opacity import (
+    add_quick_illustration_fill_opacity_control, clear_alpha_polygon_records,
+    create_alpha_canvas_polygon, refresh_alpha_polygon_fill,
+)
+from .ocr_crop_preview_ui import (
+    add_ocr_crop_preview_control,
+    draw_ocr_crop_preview,
+)
+from .layout_visualization_ui_v3 import (
+    add_layout_visualization_controls,
+    draw_layout_visualization_if_enabled,
+)
+from .entry_classification import classified_entry_crop_height
+from .review_entry_classification_ui import (
+    initialize_review_entry_classification,
+    sync_review_entry_classification,
+)
 from .project_storage import (
     STORAGE_DIRNAME, ensure_project_storage, exports_root, has_legacy_project_data,
     headword_filter_rules_path, is_managed_project, migrate_legacy_project,
@@ -141,8 +236,6 @@ from .recent_projects import (
     load_recent_projects, recent_project_details, remove_recent_project, touch_recent_project,
 )
 from .processing import (
-    append_crop_log,
-    append_illustration_crop_log,
     build_page_crop_plan,
     column_index,
     column_index_for_click,
@@ -166,9 +259,6 @@ from .processing import (
     entry_crop_piece_filename,
     resolve_crop_worker_count,
     refine_existing_entries,
-    split_whole_entries_job,
-    split_illustrations_job,
-    detect_illustrations_job,
 )
 
 
@@ -180,16 +270,8 @@ DETECTION_LABELS = {
 DETECTION_VALUES = {label: value for value, label in DETECTION_LABELS.items()}
 OCR_ENGINE_LABELS = {"tesseract": "Tesseract", "paddleocr": "PaddleOCR"}
 OCR_ENGINE_VALUES = {label: value for value, label in OCR_ENGINE_LABELS.items()}
-LENS_MODE_LABELS = {
-    "off": "① 关闭",
-    "diagnostic": "② 仅诊断对照",
-    "conflict": "③ 冲突/低可信时调用（推荐）",
-    "full": "④ 全页参与三OCR融合",
-}
-LENS_MODE_VALUES = {label: value for value, label in LENS_MODE_LABELS.items()}
 APPEARANCE_MODE_LABELS = {"light": "浅色", "dark": "深色", "system": "跟随系统"}
 APPEARANCE_MODE_VALUES = {label: value for value, label in APPEARANCE_MODE_LABELS.items()}
-SESSION_STATE_FILENAME = "session_state.json"
 
 # ISO 639-1 codes for project metadata. Common dictionary languages are kept at
 # the front of the readonly selectors; the rest remain alphabetized.
@@ -225,7 +307,6 @@ def transformed_geometry_pending(settings: AppSettings) -> bool:
 
 
 
-
 OCR_SCOPE_LABELS = {"current": "当前页", "all": "全部页面"}
 OCR_SCOPE_VALUES = {label: value for value, label in OCR_SCOPE_LABELS.items()}
 OCR_REFRESH_LABELS = {
@@ -233,349 +314,6 @@ OCR_REFRESH_LABELS = {
     "force": "强制重新识别",
 }
 OCR_REFRESH_VALUES = {label: value for value, label in OCR_REFRESH_LABELS.items()}
-
-# User-facing layout geometry is expressed as percentages of the current source
-# image. Algorithms and persisted legacy fields remain in source-image pixels.
-# Horizontal measurements use image width; vertical measurements use image height.
-LAYOUT_PERCENT_AXES = {
-    "start_y": "height",
-    "manual_x": "width",
-    "column_width": "width",
-    "gutter": "width",
-    "character_height": "height",
-    "row_padding": "height",
-    "body_indent": "width",
-    "horizontal_tolerance": "width",
-    "analysis_left": "width",
-    "analysis_right": "width",
-    "paddle_header_search_height": "height",
-}
-
-
-def _layout_percent_denominator(image: Image.Image | None, name: str) -> float | None:
-    if image is None or name not in LAYOUT_PERCENT_AXES:
-        return None
-    axis = LAYOUT_PERCENT_AXES[name]
-    return float(max(1, image.width if axis == "width" else image.height))
-
-
-def _layout_pixels_to_percent(image: Image.Image | None, name: str, pixels: int | float) -> float:
-    denominator = _layout_percent_denominator(image, name)
-    if denominator is None:
-        return float(pixels)
-    return float(pixels) * 100.0 / denominator
-
-
-def _layout_percent_to_pixels(image: Image.Image | None, name: str, percent: int | float) -> int:
-    denominator = _layout_percent_denominator(image, name)
-    if denominator is None:
-        return int(round(float(percent)))
-    return int(round(float(percent) * denominator / 100.0))
-
-
-def _format_layout_percent(value: int | float) -> str:
-    rendered = f"{float(value):.2f}".rstrip("0").rstrip(".")
-    return rendered or "0"
-
-
-def _column_pixels_to_percent(settings: AppSettings, pixels: int | float) -> float:
-    """Convert a source-pixel horizontal distance to % of configured column width."""
-    denominator = float(max(1, int(getattr(settings, "column_width", 1) or 1)))
-    return float(pixels) * 100.0 / denominator
-
-
-def _column_percent_to_pixels(settings: AppSettings, percent: int | float) -> int:
-    """Convert % of configured column width back to source-image pixels."""
-    denominator = float(max(1, int(getattr(settings, "column_width", 1) or 1)))
-    return int(round(float(percent) * denominator / 100.0))
-
-
-def _review_height_pixels_to_percent(
-    image: Image.Image | None, pixels: int | float,
-) -> float:
-    """Convert a proofreading vertical source-pixel distance to % image height."""
-    return _layout_pixels_to_percent(image, "character_height", pixels)
-
-
-def _review_height_percent_to_pixels(
-    image: Image.Image | None, percent: int | float,
-) -> int:
-    """Convert a proofreading % image-height value back to source pixels."""
-    return _layout_percent_to_pixels(image, "character_height", percent)
-
-
-def _format_review_height_percent(
-    image: Image.Image | None, pixels: int | float,
-) -> str:
-    return _format_layout_percent(_review_height_pixels_to_percent(image, pixels))
-
-
-
-def _natural_text_key(value: object) -> tuple:
-    """Natural, case-insensitive key used by the sortable page list.
-
-    Numeric runs are compared as integers so e.g. page2 sorts before page10.
-    The tagged tuple parts keep text and integer components mutually comparable.
-    """
-    return natural_text_key(value)
-
-
-def effective_main_overlay_font_size(
-    image_width: int, view_scale: float, settings: AppSettings,
-) -> int:
-    """Return the main overlay font size.
-
-    1400 px displayed page width corresponds to the configured base font size.
-    """
-
-    base_size = max(5, int(settings.main_entry_font_size))
-
-    if settings.main_entry_follow_zoom:
-        displayed_page_width = max(1.0, image_width * view_scale)
-        scale = displayed_page_width / 1400.0
-        font_size = round(base_size * scale)
-    else:
-        font_size = base_size
-
-    return max(5, min(72, font_size))
-
-
-def scaled_overlay_line_width(value: int | float, overlay_scale: float) -> int:
-    """Convert a 100%-image line width to the current canvas display width.
-
-    Main overlay line settings are defined against the image/reference scale.
-    Rendering applies exactly one display ratio so Section, column guides,
-    headword markers and illustration outlines/borders all respond identically
-    when the page is zoomed.
-    """
-    return max(1, round(max(1.0, float(value)) * max(0.01, float(overlay_scale))))
-
-
-def review_auto_fit_zoom(
-    crop_width: int | float, image_area_width: int | float, fill_ratio: float = 0.99,
-) -> float:
-    """Scale one proofreading strip to occupy the requested left-pane width."""
-    source_width = max(1.0, float(crop_width))
-    available_width = max(1.0, float(image_area_width))
-    ratio = min(1.0, max(0.01, float(fill_ratio)))
-    return max(0.01, available_width * ratio / source_width)
-
-
-def binary_preview_image(source: Image.Image) -> Image.Image:
-    """Create a display-only Otsu black/white preview without mutating source."""
-    gray = ImageOps.grayscale(source)
-    histogram = gray.histogram()
-    total = sum(histogram)
-    weighted = sum(i * count for i, count in enumerate(histogram))
-    background = 0
-    weight_background = 0
-    best_variance = -1.0
-    threshold = 127
-    for value, count in enumerate(histogram):
-        weight_background += count
-        if not weight_background:
-            continue
-        weight_foreground = total - weight_background
-        if not weight_foreground:
-            break
-        background += value * count
-        mean_background = background / weight_background
-        mean_foreground = (weighted - background) / weight_foreground
-        variance = weight_background * weight_foreground * (mean_background - mean_foreground) ** 2
-        if variance > best_variance:
-            best_variance = variance
-            threshold = value
-    return gray.point(lambda pixel: 255 if pixel > threshold else 0, mode="1").convert("RGB")
-
-
-
-def vertical_marker_contact_gap(marker_line_width: int) -> int:
-    """Offset from marker centreline so the editor border touches its painted edge."""
-    return max(1, (max(1, int(marker_line_width)) + 1) // 2)
-
-
-def vertical_overlay_layout(
-    marker_x: float,
-    marker_y: float,
-    editor_width: int,
-    editor_height: int,
-    writing_mode: str,
-    *,
-    gap: int = 3,
-) -> tuple[
-    tuple[int, int, int, int],
-    tuple[float, float],
-    str,
-    tuple[float, float],
-    str,
-]:
-    """Return a fixed-size real vertical editor layout around the marker.
-
-    editor_width/editor_height are the actual requested dimensions of the
-    vertical Text widget. For vertical-rl the widget stays entirely to the
-    left of the marker; vertical-lr is the exact opposite.
-    """
-    proxy_width = max(1, int(round(editor_width)))
-    proxy_height = max(1, int(round(editor_height)))
-    gap = max(0, int(gap))
-    top = int(round(marker_y))
-
-    if writing_mode == "vertical-rl":
-        right = int(round(marker_x - gap))
-        left = right - proxy_width
-        popup = (float(right), float(top))
-        popup_anchor = "ne"
-        index = (float(left - 3), float(top))
-        index_anchor = "ne"
-    elif writing_mode == "vertical-lr":
-        left = int(round(marker_x + gap))
-        right = left + proxy_width
-        popup = (float(left), float(top))
-        popup_anchor = "nw"
-        index = (float(right + 3), float(top))
-        index_anchor = "nw"
-    else:
-        raise ValueError(f"Not a vertical writing mode: {writing_mode}")
-
-    box = (left, top, right, top + proxy_height)
-    return box, popup, popup_anchor, index, index_anchor
-
-
-def vertical_ocr_menu_layout(
-    entry_box: tuple[int, int, int, int],
-    menu_width: int,
-    writing_mode: str,
-    canvas_width: int,
-) -> tuple[float, float, str]:
-    """Place the OCR selector outside the vertical entry box on the same side."""
-    left, top, right, _bottom = entry_box
-    menu_width = max(1, int(menu_width))
-    if writing_mode == "vertical-rl":
-        x = left - 3
-        if x - menu_width < 2:
-            x = menu_width + 2
-        return float(x), float(top), "ne"
-    if writing_mode == "vertical-lr":
-        x = right + 3
-        if x + menu_width > canvas_width - 2:
-            x = max(0, canvas_width - menu_width - 2)
-        return float(x), float(top), "nw"
-    raise ValueError(f"Not a vertical writing mode: {writing_mode}")
-
-
-def transformed_entry_anchor(
-    transform, canonical_x: float, canonical_y: float, column_width: float,
-    x_ratio: float, source_size: tuple[int, int], view_scale: float,
-) -> tuple[float, float]:
-    """Apply the entry offset in canonical space, then map it to the source."""
-    source_x, source_y = transform.canonical_to_source_point(
-        round(canonical_x + column_width * x_ratio), round(canonical_y), source_size,
-    )
-    return source_x * view_scale, source_y * view_scale
-
-
-def horizontal_overlay_layout(
-    transform, canonical_x: float, canonical_y: float, column_width: float,
-    x_ratio: float, source_size: tuple[int, int], view_scale: float, *, rtl: bool,
-) -> tuple[tuple[float, float], str, tuple[float, float], str]:
-    """Return mirror-equivalent editor/index anchors for horizontal writing."""
-    editor = transformed_entry_anchor(
-        transform, canonical_x, canonical_y, column_width, x_ratio,
-        source_size, view_scale,
-    )
-    index_source = transform.canonical_to_source_point(
-        round(canonical_x + column_width), round(canonical_y), source_size,
-    )
-    index = (index_source[0] * view_scale + (-3 if rtl else 3), index_source[1] * view_scale)
-    return editor, ("ne" if rtl else "nw"), index, ("ne" if rtl else "nw")
-
-
-def horizontal_ocr_menu_layout(
-    editor_x: float, editor_y: float, editor_width: int, *, rtl: bool,
-) -> tuple[float, float, str]:
-    """Place the OCR selector outside the editor in its reading direction."""
-    if rtl:
-        return editor_x - editor_width - 3, editor_y, "ne"
-    return editor_x + editor_width + 3, editor_y, "nw"
-
-
-def entry_index_label_layout(
-    editor_x: float,
-    editor_y: float,
-    editor_width: int,
-    editor_height: int,
-    *,
-    horizontal: bool,
-    rtl: bool = False,
-    vertical_box: tuple[int, int, int, int] | None = None,
-    gap: int = 0,
-) -> tuple[float, float, str]:
-    """Place the entry sequence label immediately before the editor.
-
-    Horizontal labels respect reading direction (left of LTR, right of RTL).
-    Vertical labels sit immediately above the text box because vertical reading
-    proceeds from top to bottom.
-    """
-    gap = max(0, int(gap))
-    if horizontal:
-        if rtl:
-            return float(editor_x + gap), float(editor_y), "nw"
-        return float(editor_x - gap), float(editor_y), "ne"
-    if vertical_box is None:
-        raise ValueError("vertical_box is required for vertical entry labels")
-    left, top, right, _bottom = vertical_box
-    return float((left + right) / 2.0), float(top - gap), "s"
-
-
-def _sorted_page_list_rows(rows: list[tuple[str, tuple]], column: str, descending: bool = False) -> list[tuple[str, tuple]]:
-    """Sort Treeview-like page rows without changing their stable page iids.
-
-    ``rows`` contains ``(iid, values)`` pairs. Empty cells stay at the bottom in
-    either direction, while visible values use natural text ordering.
-    """
-    # Accept older four/five-value rows in unit callers/session migrations.
-    max_values = max((len(values) for _iid, values in rows), default=0)
-    has_section = max_values >= 6
-    has_bookmark = max_values >= 5
-    if has_section:
-        mapping = {
-            "bookmark": 0, "page": 1, "section": 2, "lined": 3,
-            "fill_status": 4, "illustrations": 5,
-        }
-    elif has_bookmark:
-        mapping = {"bookmark": 0, "page": 1, "lined": 2, "fill_status": 3, "illustrations": 4}
-    else:
-        mapping = {"page": 0, "lined": 1, "fill_status": 2, "illustrations": 3}
-    column_index = mapping.get(column, 1 if has_bookmark else 0)
-    populated: list[tuple[str, tuple]] = []
-    empty: list[tuple[str, tuple]] = []
-    for row in rows:
-        values = row[1]
-        value = values[column_index] if column_index < len(values) else ""
-        (populated if str(value).strip() else empty).append(row)
-    populated.sort(
-        key=lambda row: _natural_text_key(row[1][column_index] if column_index < len(row[1]) else ""),
-        reverse=descending,
-    )
-    return populated + empty
-
-def _fill_status_cell_style(status_text: object) -> tuple[str, str] | None:
-    """Return semantic (background, foreground) colors for fill-status cells.
-
-    ``未核对`` deliberately uses the native Treeview background, so it returns
-    ``None`` and no overlay is created.
-    """
-    text = str(status_text or "").strip()
-    if text == "一致":
-        return "#d9ead3", "#245b2a"
-    if text.startswith("少 " ) or text.startswith("多 " ) or text in {"少", "多"}:
-        return "#f8d7da", "#6b1f25"
-    if text == "待重新核对":
-        return "#fff3cd", "#6b5714"
-    if text == "无资料":
-        return "#e9ecef", "#495057"
-    return None
-
 
 def _review_crop_settings(image: Image.Image, settings: AppSettings, viewer_width: int) -> AppSettings:
     """Return review settings unchanged; geometry is already source pixels."""
@@ -594,27 +332,6 @@ def _review_crop_context(
     return (
         _review_crop_settings(image, effective, viewer_width),
         derive_geometry(analysis_image, effective),
-    )
-
-
-def _is_single_cjk_review_headword(value: object) -> bool:
-    """Return True for a single CJK ideograph used as a review headword.
-
-    Single-character display headwords in classical CJK dictionaries are often
-    typeset substantially taller than ordinary multi-character entries.  They
-    therefore need a review-only vertical allowance without changing the
-    project's global character-height setting.
-    """
-    text = unicodedata.normalize("NFKC", str(value or "")).strip()
-    chars = [ch for ch in text if not ch.isspace() and not unicodedata.category(ch).startswith("P")]
-    if len(chars) != 1:
-        return False
-    code = ord(chars[0])
-    return (
-        0x3400 <= code <= 0x4DBF
-        or 0x4E00 <= code <= 0x9FFF
-        or 0xF900 <= code <= 0xFAFF
-        or 0x20000 <= code <= 0x3134F
     )
 
 
@@ -663,117 +380,40 @@ def _review_line_box(
     settings: AppSettings,
     next_entry: WordEntry | None = None,
 ) -> tuple[int, int, int, int]:
-    """Return a proofreading crop box with an explicit single-CJK height.
+    """Return a proofreading crop box using canonical Entry classification."""
+    configured_regular = max(
+        0, int(getattr(settings, "entry_regular_crop_height", 0) or 0)
+    )
+    configured_oversized = max(
+        0, int(getattr(settings, "entry_oversized_crop_height", 0) or 0)
+    )
+    regular_height = (
+        configured_regular or _effective_review_regular_crop_height(settings)
+    )
+    oversized_height = (
+        configured_oversized or _effective_review_single_cjk_line_height(settings)
+    )
+    height = classified_entry_crop_height(
+        entry,
+        settings,
+        regular_height=regular_height,
+        oversized_height=oversized_height,
+    )
+    if geometry.transform.kind != "identity":
+        classified_settings = replace(settings)
+        classified_settings.character_height = int(height)
+        return line_box(entry, geometry, image, classified_settings)
 
-    Normal rows use the shared ``character_height`` exactly as the main window
-    does. A one-character CJK headword uses the independent review-only height.
-    We intentionally do not cap it at the next marker: hand-drawn separator Y
-    positions are not perfectly uniform, and that old cap could re-clip a tall
-    display character even after increasing its requested row height.
-    """
-    if not _is_single_cjk_review_headword(entry.word):
-        if geometry.transform.kind != "identity":
-            regular_settings = replace(settings)
-            regular_settings.character_height = _effective_review_regular_crop_height(settings)
-            return line_box(entry, geometry, image, regular_settings)
-        left, _old_top, right, _bottom = line_box(entry, geometry, image, settings)
-        row_padding = max(0, int(settings.row_padding))
-        regular_height = _effective_review_regular_crop_height(settings)
-        half_spacing = round(0.5 * row_padding)
-        # Identity layout: source Y and 原图位置 are the same coordinate.
-        top = max(geometry.top, int(entry.y) - half_spacing)
-        return left, top, right, min(image.height, top + max(1, regular_height))
-
-    single_settings = replace(settings)
-    single_settings.character_height = _effective_review_single_cjk_line_height(settings)
-    return line_box(entry, geometry, image, single_settings)
-
-def _review_editor_font_size(settings: AppSettings) -> int:
-    """Review text font is fixed; image zoom must not resize editor typography."""
-    return max(5, int(settings.review_entry_font_size))
-
-
-def _entry_font_spec(family: str, size: int, bold: bool = False, italic: bool = False) -> tuple:
-    """Return a Tk font tuple while keeping main/review typography independent."""
-    styles: list[str] = []
-    if bold:
-        styles.append("bold")
-    if italic:
-        styles.append("italic")
-    return (str(family or "TkDefaultFont"), int(size), *styles)
-
-
-def _review_similarity_key(value: object) -> str:
-    """Normalize a review/OCR string for visual similarity comparison.
-
-    Full/half-width forms and case are normalized, while whitespace and
-    punctuation are ignored. Letters (including accents), CJK characters and
-    digits remain significant.
-    """
-    text = unicodedata.normalize("NFKC", str(value or "")).casefold()
-    kept: list[str] = []
-    for ch in text:
-        category = unicodedata.category(ch)
-        if ch.isspace() or category.startswith("P") or category.startswith("Z"):
-            continue
-        kept.append(ch)
-    return "".join(kept)
-
-
-def _review_text_similarity(left: object, right: object) -> float | None:
-    """Return 0..1 OCR/editor similarity, or None when either side is blank."""
-    a = _review_similarity_key(left)
-    b = _review_similarity_key(right)
-    if not a or not b:
-        return None
-    if a == b:
-        return 1.0
-    return difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
-
-
-def _focused_review_character_tokens(value: object) -> tuple[str, ...]:
-    """Parse comma-separated focused-review character tokens deterministically."""
-    parts = [
-        token.strip()
-        for token in re.split(r"[,，]+", str(value or ""))
-        if token.strip()
-    ]
-    return tuple(dict.fromkeys(parts))
-
-
-def _focused_review_page_indices(value: object, total: int) -> list[int]:
-    """Parse 1-based ranges such as 1-20,25,30-35; blank means all pages."""
-    total = max(0, int(total))
-    text = str(value or "").strip()
-    if not text:
-        return list(range(total))
-    result: set[int] = set()
-    for token in re.split(r"[,，;；\s]+", text):
-        token = token.strip()
-        if not token:
-            continue
-        match = re.fullmatch(r"(\d+)\s*[-–—~～]\s*(\d+)", token)
-        if match:
-            start, end = int(match.group(1)), int(match.group(2))
-            if end < start:
-                start, end = end, start
-            if start < 1 or end > total:
-                raise ValueError(f"页面范围必须在 1–{total} 内。")
-            result.update(range(start - 1, end))
-            continue
-        if not token.isdigit():
-            raise ValueError("页面范围格式示例：1-20,25,30-35；留空表示全部页面。")
-        page = int(token)
-        if page < 1 or page > total:
-            raise ValueError(f"页面范围必须在 1–{total} 内。")
-        result.add(page - 1)
-    return sorted(result)
-
-
-def _focused_review_is_single_character(value: object) -> bool:
-    text = unicodedata.normalize("NFKC", str(value or "")).strip()
-    return len([char for char in text if not char.isspace()]) == 1
-
+    left, _old_top, right, _bottom = line_box(
+        entry, geometry, image, settings
+    )
+    row_padding = max(0, int(getattr(settings, "row_padding", 0) or 0))
+    half_spacing = round(0.5 * row_padding)
+    top = max(int(geometry.top), int(entry.y) - half_spacing)
+    return left, top, right, min(
+        int(image.height),
+        top + max(1, int(height)),
+    )
 
 def _apply_focused_review_page_updates(
     page: Path, pages: list[Path], page_index: int, changes: list[dict],
@@ -831,365 +471,6 @@ def _apply_focused_review_page_updates(
         _write_pdic_atomic(target_path, original_entries, image_width, page_links)
         raise
     return planned, []
-
-
-def _candidate_for_entry_from_list(
-    entry: WordEntry, candidates: list[dict], *, y_tolerance: int,
-) -> dict | None:
-    """Match one PDIC row to OCR metadata using original-image X/Y."""
-    if entry.candidate_id:
-        for candidate in candidates:
-            if str(candidate.get("candidate_id", "")) == entry.candidate_id:
-                return candidate
-    nearby: list[tuple[float, dict]] = []
-    tolerance = max(4, int(y_tolerance))
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            continue
-        if str(candidate.get("position_variant") or "refined") == "original":
-            continue
-        try:
-            dx = abs(int(candidate.get("source_x", entry.x)) - int(entry.x))
-            dy = abs(int(candidate.get("source_y", entry.y)) - int(entry.y))
-        except (TypeError, ValueError):
-            continue
-        if dx <= 20 and dy <= tolerance:
-            nearby.append((dy + dx * 0.1, candidate))
-    return min(nearby, key=lambda item: item[0])[1] if nearby else None
-
-def _candidate_word_for_ocr_source(candidate: dict | None, source: str) -> str:
-    """Return the OCR lemma for one explicit review comparison source."""
-    if not candidate:
-        return ""
-    key = str(source or "fusion").strip().lower()
-    if key == "fusion":
-        return str(candidate.get("word") or "").strip()
-    side = candidate.get(key, {}) or {}
-    if not isinstance(side, dict):
-        return ""
-    return str(side.get("lemma") or "").strip()
-
-
-def _review_similarity_color(score: float | None) -> str:
-    """Semantic background colour for one OCR option in the review panel."""
-    if score is None:
-        return "#f2f2f2"
-    if score >= 0.98:
-        return "#b7e1cd"
-    if score >= 0.85:
-        return "#d9ead3"
-    if score >= 0.65:
-        return "#fff2cc"
-    if score >= 0.40:
-        return "#fce5cd"
-    return "#f4cccc"
-
-
-def _candidate_choice_rows(candidate: dict | None) -> list[tuple[str, str, str, float | None, bool]]:
-    """Return compact, deterministic OCR choices for one review candidate.
-
-    The last boolean marks the fused/final row.  Engine rows are deliberately
-    retained even when they recognize the same lemma: seeing agreement between
-    PaddleOCR, Tesseract and Lens is useful context when editing on the page.
-    """
-    if not candidate:
-        return []
-    rows: list[tuple[str, str, str, float | None, bool]] = []
-    for engine, label in (("paddle", "PaddleOCR"), ("tesseract", "Tesseract"), ("lens", "Google Lens")):
-        side = candidate.get(engine, {}) or {}
-        word = str(side.get("lemma") or "").strip()
-        if not word:
-            continue
-        confidence = side.get("confidence")
-        try:
-            confidence_value = float(confidence) if confidence is not None else None
-        except (TypeError, ValueError):
-            confidence_value = None
-        rows.append((engine, label, word, confidence_value, False))
-    final_word = str(candidate.get("word") or "").strip()
-    if final_word:
-        rows.append((str(candidate.get("final_engine") or "fusion"), "融合结果", final_word, None, True))
-    return rows
-
-
-def _build_words_page_lookup(page_stems: list[str]) -> tuple[dict[str, str], dict[int, str], dict[int, str]]:
-    """Build O(1) lookup tables for large page-aware word lists.
-
-    v2.9.5 resolved every single TXT row by rebuilding an exact-name dict and
-    rescanning all project page stems.  On a 7,822-page / 190k-word dictionary
-    that becomes effectively O(words × pages) and can look like a hung GUI.
-    The tables below are built once, preserving the old ambiguity rules.
-    """
-    exact: dict[str, str] = {}
-    numeric_candidates: dict[int, list[str]] = {}
-    suffix_candidates: dict[int, list[str]] = {}
-    for stem in page_stems:
-        exact[stem.casefold()] = stem
-        if stem.isdigit():
-            numeric_candidates.setdefault(int(stem), []).append(stem)
-        match = re.search(r"(\d+)$", stem)
-        if match:
-            suffix_candidates.setdefault(int(match.group(1)), []).append(stem)
-    numeric = {number: values[0] for number, values in numeric_candidates.items() if len(values) == 1}
-    suffix = {number: values[0] for number, values in suffix_candidates.items() if len(values) == 1}
-    return exact, numeric, suffix
-
-
-def _resolve_words_page_token(
-    token: str, page_stems: list[str],
-    lookup: tuple[dict[str, str], dict[int, str], dict[int, str]] | None = None,
-) -> str | None:
-    """Resolve a page token from legacy text to one project page stem."""
-    cleaned = Path(str(token).strip()).stem.strip()
-    if not cleaned:
-        return None
-    exact, numeric, suffix = lookup or _build_words_page_lookup(page_stems)
-    hit = exact.get(cleaned.casefold())
-    if hit:
-        return hit
-    if cleaned.isdigit():
-        number = int(cleaned)
-        hit = numeric.get(number)
-        if hit:
-            return hit
-        return suffix.get(number)
-    return None
-
-
-def _parse_words_of_pages_text(
-    text: str, page_stems: list[str], *, present_pages: set[str] | None = None,
-) -> dict[str, list[str]]:
-    """Parse page-aware legacy headword text without cross-page spillover.
-
-    Supported forms are full PDIC records (page stem in field 6), tab-delimited
-    ``page<TAB>word`` rows, and explicit page sections such as ``[0012]`` or
-    ``页码: 0012``. A plain undivided word list is deliberately rejected: once
-    page boundaries are unknown, distributing by cursor would recreate the exact
-    spillover bug this importer is intended to prevent.
-    """
-    mapping: dict[str, list[str]] = {stem: [] for stem in page_stems}
-    lookup = _build_words_page_lookup(page_stems)
-    raw_lines = text.splitlines()
-    nonblank = [line for line in raw_lines if line.strip()]
-    if not nonblank:
-        return mapping
-
-    rich_hits = 0
-    for raw in nonblank:
-        fields = raw.split("#")
-        if len(fields) >= 8:
-            page = _resolve_words_page_token(fields[5], page_stems, lookup)
-            if page is not None:
-                mapping[page].append(fields[0].strip())
-                if present_pages is not None:
-                    present_pages.add(page)
-                rich_hits += 1
-    if rich_hits:
-        return mapping
-
-    tab_hits = 0
-    tab_mapping: dict[str, list[str]] = {stem: [] for stem in page_stems}
-    for raw in nonblank:
-        fields = raw.split("\t", 1)
-        if len(fields) != 2:
-            continue
-        page = _resolve_words_page_token(fields[0], page_stems, lookup)
-        if page is not None:
-            tab_mapping[page].append(fields[1].strip())
-            if present_pages is not None:
-                present_pages.add(page)
-            tab_hits += 1
-    if tab_hits:
-        return tab_mapping
-
-    section_mapping: dict[str, list[str]] = {stem: [] for stem in page_stems}
-    current: str | None = None
-    saw_section = False
-    for raw in raw_lines:
-        stripped = raw.strip()
-        if not stripped:
-            continue
-        match = re.match(r"^\[([^\]]+)\]$", stripped)
-        if not match:
-            match = re.match(r"^(?:page|页码|頁碼|页|頁)\s*[:：]?\s*(\S+)\s*$", stripped, re.I)
-        if match:
-            page = _resolve_words_page_token(match.group(1), page_stems, lookup)
-            if page is None:
-                raise ValueError(f"TXT 中找不到对应项目页面：{match.group(1)}")
-            current = page
-            if present_pages is not None:
-                present_pages.add(page)
-            saw_section = True
-            continue
-        if current is not None:
-            section_mapping[current].append(stripped.split("#", 1)[0].strip())
-    if saw_section:
-        return section_mapping
-
-    raise ValueError(
-        "该 TXT 没有可识别的页码边界。请使用完整 PDIC/_WordsOfPages 记录、"
-        "page\t词条，或 [页码] 分组格式；为避免错页，本功能不会把无分页的词表顺序灌入下一页。"
-    )
-
-
-def _fill_page_entries(entries: list[WordEntry], words: list[str]) -> tuple[int, int, int]:
-    """Fill only the words belonging to one page and never borrow from neighbours."""
-    ordered = list(entries)
-    count = min(len(ordered), len(words))
-    for entry, word in zip(ordered[:count], words[:count]):
-        entry.word = str(word).strip()
-    return count, len(ordered), len(words)
-
-
-def _parse_merged_pdic_text(
-    text: str, page_stems: list[str],
-) -> tuple[dict[str, list[WordEntry]], dict[str, int]]:
-    """Parse a whole-dictionary PDIC text into independent per-page entries.
-
-    A merged PDIC is simply a concatenation of normal 8-field PDIC records.
-    Field 6 (index 5) identifies the source page.  Records are resolved against
-    the current project's page stems with the same leading-zero/numeric rules
-    used by the page-aware headword importer.  Unknown pages are ignored rather
-    than spilled into a neighbouring page; malformed PDIC rows are rejected.
-    """
-    mapping: dict[str, list[WordEntry]] = {stem: [] for stem in page_stems}
-    lookup = _build_words_page_lookup(page_stems)
-    matched = 0
-    unmatched = 0
-    nonblank = 0
-    for line_no, raw in enumerate(text.splitlines(), 1):
-        if not raw.strip():
-            continue
-        nonblank += 1
-        fields = raw.split("#")
-        if len(fields) < 8:
-            raise ValueError(f"整体 PDIC 第 {line_no} 行字段不足 8 个，不是有效 PDIC 记录")
-        try:
-            x = int(float(fields[1]))
-            y = int(float(fields[2]))
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"整体 PDIC 第 {line_no} 行坐标无效") from exc
-        page = _resolve_words_page_token(fields[5], page_stems, lookup)
-        if page is None:
-            unmatched += 1
-            continue
-        mapping[page].append(
-            WordEntry(
-                word=str(fields[0]),
-                x=x,
-                y=y,
-                current_page=page,
-                previous_page=str(fields[6] or "@"),
-                next_page=str(fields[7] or "@"),
-            )
-        )
-        matched += 1
-    if nonblank == 0:
-        raise ValueError("整体 PDIC 文件为空，没有可用于恢复的记录。")
-    if matched == 0:
-        raise ValueError("整体 PDIC 中没有任何记录能对应当前项目页面，请核对是否选择了正确文件。")
-    return mapping, {"records": nonblank, "matched": matched, "unmatched": unmatched}
-
-
-def _write_pdic_atomic(
-    target: Path, entries: list[WordEntry], image_width: int, pages: tuple[str, str, str],
-) -> None:
-    """Atomically replace one page PDIC so stop/crash never leaves a half file."""
-    temp = target.with_name(f".{target.name}.restore.tmp")
-    try:
-        write_pdic(temp, entries, image_width, pages)
-        os.replace(temp, target)
-    finally:
-        try:
-            if temp.exists():
-                temp.unlink()
-        except OSError:
-            pass
-
-
-def _page_word_mapping_text(page_order: list[str], mapping: dict[str, list[str]]) -> str:
-    """Render page-aware headwords as ``page<TAB>word`` text in page order."""
-    rows: list[str] = []
-    for page in page_order:
-        for raw_word in mapping.get(page, []):
-            word = str(raw_word or "").replace("\t", " ").replace("\r", " ").replace("\n", " ")
-            rows.append(f"{page}\t{word}")
-    return "\n".join(rows) + ("\n" if rows else "")
-
-
-def _compare_page_word_sequences(page: str, old_words: list[str], new_words: list[str]) -> list[dict[str, object]]:
-    """Return line-oriented additions, deletions and replacements for one page.
-
-    The comparison is exact after the surrounding page-aware parsers have
-    stripped line endings/outer whitespace.  ``SequenceMatcher`` first anchors
-    unchanged headwords, so a newly inserted row normally appears as an insert
-    rather than turning every following row into a false modification.
-    """
-    changes: list[dict[str, object]] = []
-    matcher = difflib.SequenceMatcher(a=list(old_words), b=list(new_words), autojunk=False)
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
-            continue
-        if tag == "delete":
-            for old_index in range(i1, i2):
-                changes.append({
-                    "kind": "删除", "page": page,
-                    "old_index": old_index + 1, "old": old_words[old_index],
-                    "new_index": None, "new": "",
-                })
-            continue
-        if tag == "insert":
-            for new_index in range(j1, j2):
-                changes.append({
-                    "kind": "新增", "page": page,
-                    "old_index": None, "old": "",
-                    "new_index": new_index + 1, "new": new_words[new_index],
-                })
-            continue
-
-        paired = min(i2 - i1, j2 - j1)
-        for offset in range(paired):
-            old_index = i1 + offset
-            new_index = j1 + offset
-            changes.append({
-                "kind": "修改", "page": page,
-                "old_index": old_index + 1, "old": old_words[old_index],
-                "new_index": new_index + 1, "new": new_words[new_index],
-            })
-        for old_index in range(i1 + paired, i2):
-            changes.append({
-                "kind": "删除", "page": page,
-                "old_index": old_index + 1, "old": old_words[old_index],
-                "new_index": None, "new": "",
-            })
-        for new_index in range(j1 + paired, j2):
-            changes.append({
-                "kind": "新增", "page": page,
-                "old_index": None, "old": "",
-                "new_index": new_index + 1, "new": new_words[new_index],
-            })
-    return changes
-
-
-def _compare_page_word_mappings(
-    page_order: list[str], old_mapping: dict[str, list[str]], new_mapping: dict[str, list[str]],
-) -> tuple[list[dict[str, object]], dict[str, int]]:
-    """Compare old/new page-aware word mappings and return changes + totals."""
-    changes: list[dict[str, object]] = []
-    counts = {"新增": 0, "删除": 0, "修改": 0, "old_rows": 0, "new_rows": 0}
-    for page in page_order:
-        old_words = list(old_mapping.get(page, []))
-        new_words = list(new_mapping.get(page, []))
-        counts["old_rows"] += len(old_words)
-        counts["new_rows"] += len(new_words)
-        page_changes = _compare_page_word_sequences(page, old_words, new_words)
-        changes.extend(page_changes)
-        for item in page_changes:
-            kind = str(item.get("kind") or "")
-            if kind in {"新增", "删除", "修改"}:
-                counts[kind] += 1
-    return changes, counts
-
 
 
 class SettingsDialog(tk.Toplevel):
@@ -1431,26 +712,15 @@ class SettingsDialog(tk.Toplevel):
             self._bind_help_widget(label_widget, callback)
             self._bind_help_widget(control, callback)
             self._bind_help_widget(info, callback)
-            info.bind("<Button-1>", lambda _e, n=name: self._show_setting_help(n), add="+")
-
-            inline_help = ttk.Label(
-                group,
-                text=self.SETTING_HELP.get(
-                    name,
-                    "作用：高级参数。当前主流程没有更具体的用户说明时，建议保持默认值。",
+            info.bind(
+                "<Button-1>",
+                lambda _event, n=name, hi=help_images: self._show_setting_help(
+                    n, show_layout_image=hi
                 ),
-                foreground="#666b73",
-                justify="left",
+                add="+",
             )
-            inline_help.grid(
-                row=row + 1, column=0, columnspan=3,
-                sticky="ew", padx=(12, 8), pady=(0, 8),
-            )
-            self._bind_responsive_labels(
-                group, inline_help, horizontal_padding=34, min_wrap=180
-            )
-            self._bind_help_widget(inline_help, callback)
-            row += 2
+
+            row += 1
         return group
 
     def _add_check_group(
@@ -1510,24 +780,7 @@ class SettingsDialog(tk.Toplevel):
                 lambda _e, l=label, n=name: self._show_check_help(l, n),
                 add="+",
             )
-            check_help = ttk.Label(
-                group,
-                text=self.CHECK_HELP.get(
-                    name,
-                    "作用：高级行为开关；不确定时建议保持默认。",
-                ),
-                foreground="#666b73",
-                justify="left",
-            )
-            check_help.grid(
-                row=row + 1, column=0, columnspan=2,
-                sticky="ew", padx=(22, 8), pady=(0, 7),
-            )
-            self._bind_responsive_labels(
-                group, check_help, horizontal_padding=34, min_wrap=180
-            )
-            self._bind_help_widget(check_help, callback)
-            row += 2
+            row += 1
 
             if name == "ordinary_auto_layout" and auto_children:
                 child_grid = ttk.Frame(group)
@@ -1666,8 +919,8 @@ class SettingsDialog(tk.Toplevel):
         )
         help_hint = ttk.Label(
             help_box,
-            text="每个参数下方已直接显示详细说明；把鼠标停在设置项上、点击 ⓘ，"
-                 "或用 Tab/鼠标进入输入框时，右侧会同步显示完整说明与版面图解。",
+            text="把鼠标停在设置项上、点击 ⓘ，或用 Tab/鼠标进入输入框时，"
+                 "右侧会显示完整说明与版面图解；左侧只保留参数、单位和必要状态。",
             foreground="#7a8088",
             justify="left",
         )
@@ -2303,793 +1556,125 @@ class SettingsDialog(tk.Toplevel):
 
     @staticmethod
     def _crop_nonnegative_int(value: object, label: str) -> int:
-        try:
-            number = int(str(value).strip() or "0")
-        except ValueError as exc:
-            raise ValueError(f"{label}必须是整数") from exc
-        if number < 0:
-            raise ValueError(f"{label}不能小于0")
-        return number
+        return _settings_crop_ui.crop_nonnegative_int(value, label)
 
     def _build_crop_settings_tab(self, tab: ttk.Frame) -> None:
-        """Embed the former standalone crop-settings dialog in Settings Center."""
-        page = self._scrollable_settings_page(tab)
-        self._settings_intro(
-            page,
-            "切图设置：词条切图 / 插图切图共用",
-            "Section=0 页面使用这里的通用上下边界；Section>0 页面由主界面"
-            "【六、页面列表】中的 Section 边界接管。所有坐标均为全分辨率原图 X/Y。",
-        )
-
-        saved = self.parent._load_crop_settings()
-        defaults = {
-            "general_top_y": int(saved.get("general_top_y", self.parent.settings.start_y)),
-            "general_bottom_y": int(saved.get("general_bottom_y", 0)),
-            "entry_left_padding_x": int(saved.get("entry_left_padding_x", 0)),
-            "entry_right_padding_x": int(saved.get("entry_right_padding_x", 0)),
-            "integrate_illustrations": bool(saved.get("integrate_illustrations", True)),
-            "polygon_margin": int(saved.get("polygon_margin", 0)),
-            "parallel_workers": int(
-                saved.get("parallel_workers", self.parent.settings.crop_parallel_workers)
-            ),
-        }
-        self._crop_specials = (
-            dict(saved.get("special_pages", {}))
-            if isinstance(saved.get("special_pages", {}), dict)
-            else {}
-        )
-        for name, value in defaults.items():
-            self.crop_vars[name] = (
-                tk.BooleanVar(value=value)
-                if isinstance(value, bool)
-                else tk.StringVar(value=str(value))
-            )
-
-        general = ttk.LabelFrame(page, text="通用切图规则", padding=(12, 10))
-        general.pack(fill="x", pady=(0, 10))
-        general.columnconfigure(1, weight=1)
-        general.columnconfigure(3, weight=1)
-
-        ttk.Label(general, text="一般页切图上边界 Y（原图）：").grid(
-            row=0, column=0, sticky="e", pady=4
-        )
-        ttk.Entry(
-            general, textvariable=self.crop_vars["general_top_y"], width=12
-        ).grid(row=0, column=1, sticky="w", padx=(8, 18), pady=4)
-        ttk.Label(general, text="一般页切图下边界 Y（原图）：").grid(
-            row=0, column=2, sticky="e", pady=4
-        )
-        ttk.Entry(
-            general, textvariable=self.crop_vars["general_bottom_y"], width=12
-        ).grid(row=0, column=3, sticky="w", padx=(8, 0), pady=4)
-        top_bottom_help = ttk.Label(
-            general,
-            text="0 = 页面底部；仅用于 Section=0 页面。Section>0 时以该页 Section 边界为准。",
-            foreground="#666666",
-            justify="left",
-        )
-        top_bottom_help.grid(
-            row=1, column=0, columnspan=4, sticky="w", pady=(0, 6)
-        )
-
-        ttk.Label(general, text="词条 X 左侧额外留白：").grid(
-            row=2, column=0, sticky="e", pady=4
-        )
-        ttk.Entry(
-            general, textvariable=self.crop_vars["entry_left_padding_x"], width=12
-        ).grid(row=2, column=1, sticky="w", padx=(8, 18), pady=4)
-        ttk.Label(general, text="词条 X 右侧额外留白：").grid(
-            row=2, column=2, sticky="e", pady=4
-        )
-        ttk.Entry(
-            general, textvariable=self.crop_vars["entry_right_padding_x"], width=12
-        ).grid(row=2, column=3, sticky="w", padx=(8, 0), pady=4)
-        ttk.Label(
-            general,
-            text="单位：原图像素；运行时不按页面宽度或窗口缩放换算。",
-            foreground="#666666",
-        ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(0, 6))
-
-        ttk.Checkbutton(
-            general,
-            text="综合插图计算词条切图信息",
-            variable=self.crop_vars["integrate_illustrations"],
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=4)
-        ttk.Label(
-            general,
-            text="关闭后：词条只按自身矩形切图；PPP 不扩框/不联合/不参与词条切图顺序。",
-            foreground="#666666",
-        ).grid(row=4, column=2, columnspan=2, sticky="w", pady=4)
-
-        ttk.Label(general, text="PPP 多边形外扩（原图）：").grid(
-            row=5, column=0, sticky="e", pady=4
-        )
-        ttk.Entry(
-            general, textvariable=self.crop_vars["polygon_margin"], width=12
-        ).grid(row=5, column=1, sticky="w", padx=(8, 18), pady=4)
-        ttk.Label(general, text="并行进程：").grid(
-            row=5, column=2, sticky="e", pady=4
-        )
-        ttk.Entry(
-            general, textvariable=self.crop_vars["parallel_workers"], width=12
-        ).grid(row=5, column=3, sticky="w", padx=(8, 0), pady=4)
-        ttk.Label(
-            general,
-            text="PPP 外扩单位为原图像素；并行进程 0 = 自动，允许 0–8。",
-            foreground="#666666",
-        ).grid(row=6, column=0, columnspan=4, sticky="w", pady=(0, 4))
-
-        section_info = ttk.LabelFrame(page, text="特殊页面范围", padding=(12, 10))
-        section_info.pack(fill="x", pady=(0, 10))
-        section_label = ttk.Label(
-            section_info,
-            text="特殊页面请在主界面【六、页面列表】的 Section 列双击设置。"
-                 "Section=1 可直接拖动单一上/下边界；Section≥2 可设置多个阅读区。",
-            justify="left",
-        )
-        section_label.pack(anchor="w", fill="x")
-        self._bind_responsive_labels(
-            section_info, section_label, horizontal_padding=12, min_wrap=160
-        )
-
-        ttk.Label(
-            page,
-            text="本页签与设置中心其他设置一样自动保存；不再弹出独立【切图设置】窗口。",
-            foreground="#666666",
-        ).pack(anchor="w", pady=(0, 4))
+        _settings_crop_ui.build_crop_settings_tab(self, tab)
 
     def _crop_settings_payload(self) -> dict:
-        if not self.crop_vars:
-            return self.parent._load_crop_settings()
-        top = self._crop_nonnegative_int(
-            self.crop_vars["general_top_y"].get(), "一般页切图上边界"
-        )
-        bottom = self._crop_nonnegative_int(
-            self.crop_vars["general_bottom_y"].get(), "一般页切图下边界"
-        )
-        entry_left = self._crop_nonnegative_int(
-            self.crop_vars["entry_left_padding_x"].get(), "词条左侧额外留白"
-        )
-        entry_right = self._crop_nonnegative_int(
-            self.crop_vars["entry_right_padding_x"].get(), "词条右侧额外留白"
-        )
-        margin = self._crop_nonnegative_int(
-            self.crop_vars["polygon_margin"].get(), "PPP多边形外扩"
-        )
-        workers = self._crop_nonnegative_int(
-            self.crop_vars["parallel_workers"].get(), "并行进程数"
-        )
-        if workers > 8:
-            raise ValueError("切图并行进程数必须为 0–8")
-        if bottom and bottom <= top:
-            raise ValueError("一般页切图下边界必须大于上边界，或填0表示页面底部")
-        return {
-            "version": CROP_SETTINGS_VERSION,
-            "coordinate_space": SOURCE_COORDINATE_SPACE,
-            "general_top_y": top,
-            "general_bottom_y": bottom,
-            "entry_left_padding_x": entry_left,
-            "entry_right_padding_x": entry_right,
-            "integrate_illustrations": bool(
-                self.crop_vars["integrate_illustrations"].get()
-            ),
-            "polygon_margin": margin,
-            "parallel_workers": workers,
-            "special_pages": dict(self._crop_specials),
-        }
+        return _settings_crop_ui.crop_settings_payload(self)
 
     def _save_integrated_crop_settings(self) -> None:
-        payload = self._crop_settings_payload()
-        self.parent.settings.crop_parallel_workers = int(payload["parallel_workers"])
-        if not self.parent.project:
-            return
-        path = qt_root(self.parent.project.root) / CropSettingsDialog.CONFIG_NAME
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _settings_crop_ui.save_integrated_crop_settings(self)
 
     def _configure_settings_appearance_styles(self) -> None:
-        style = ttk.Style(self)
-        base = appearance_palette(self.parent.appearance_mode)
-        if self.parent.appearance_mode == "dark":
-            selected_bg = base["surface"]
-            active_bg = base["button_hover"]
-            idle_bg = base["surface_alt"]
-            selected_fg = base["text"]
-            idle_fg = base["muted"]
-        else:
-            selected_bg = str(style.lookup("TFrame", "background") or "#f6f7f9")
-            active_bg = "#f1f3f6"
-            idle_bg = "#e6eaf0"
-            selected_fg = "#111827"
-            idle_fg = "#4b5563"
-        style.configure(
-            "PC.Settings.TNotebook",
-            background=selected_bg,
-            borderwidth=0,
-            tabmargins=(0, 2, 0, 0),
-        )
-        style.configure(
-            "PC.Settings.TNotebook.Tab",
-            padding=(13, 7),
-            borderwidth=1,
-            relief="raised",
-            background=idle_bg,
-            foreground=idle_fg,
-        )
-        style.map(
-            "PC.Settings.TNotebook.Tab",
-            background=[
-                ("selected", selected_bg),
-                ("active", active_bg),
-                ("!selected", idle_bg),
-            ],
-            foreground=[
-                ("selected", selected_fg),
-                ("active", selected_fg),
-                ("!selected", idle_fg),
-            ],
-            relief=[("selected", "sunken"), ("!selected", "raised")],
-        )
+        _settings_window_ui.configure_settings_appearance_styles(self)
 
     def refresh_appearance(self) -> None:
-        """Apply the global appearance without touching unsaved setting values."""
-        self._configure_settings_appearance_styles()
-        self.parent._apply_current_appearance(self)
-        self._schedule_settings_help_image_render()
+        _settings_window_ui.refresh_appearance(self)
 
     def select_tab(self, key: str | None) -> None:
-        """Select a requested settings task when reusing the modeless window."""
-        if not hasattr(self, "notebook") or not hasattr(self, "_settings_tabs"):
-            return
-        tab = self._settings_tabs.get(key or "common", self._settings_tabs["common"])
-        try:
-            self.notebook.select(tab)
-        except tk.TclError:
-            pass
+        _settings_window_ui.select_tab(self, key)
 
     def _build_project_details_tab(self, tab: ttk.Frame) -> None:
-        """Build project metadata fields without mixing them into OCR controls."""
-        tab.columnconfigure(0, weight=1)
-        form = ttk.LabelFrame(tab, text="词典项目详情", padding=(16, 12))
-        form.grid(row=0, column=0, sticky="new", padx=14, pady=14)
-        form.columnconfigure(1, weight=1)
-
-        fields = (
-            ("词典完整名称：", "dictionary_full_name"),
-            ("词典缩写名称：", "dictionary_abbreviation"),
-            ("ISBN：", "dictionary_isbn"),
-        )
-        for row, (label, name) in enumerate(fields):
-            ttk.Label(form, text=label).grid(row=row, column=0, sticky="e", padx=(0, 8), pady=5)
-            var = tk.StringVar(value=str(getattr(self.parent.settings, name)))
-            self.vars[name] = var
-            ttk.Entry(form, textvariable=var, width=42).grid(row=row, column=1, sticky="ew", pady=5)
-
-        ocr_language = str(self.vars.get("ocr_language").get() if self.vars.get("ocr_language") else "")
-        configured_index_language = str(self.parent.settings.dictionary_index_language).strip().lower()
-        suggested_index_language = project_language_from_ocr(ocr_language)
-        self._project_index_language_auto = not configured_index_language
-        index_var = tk.StringVar(value=configured_index_language or suggested_index_language)
-        content_var = tk.StringVar(value=str(self.parent.settings.dictionary_content_language).strip().lower())
-        self.vars["dictionary_index_language"] = index_var
-        self.vars["dictionary_content_language"] = content_var
-
-        ttk.Label(form, text="索引语言：").grid(row=3, column=0, sticky="e", padx=(0, 8), pady=5)
-        index_combo = ttk.Combobox(
-            form, textvariable=index_var, values=PROJECT_LANGUAGE_CODES, state="readonly", width=12,
-        )
-        index_combo.grid(row=3, column=1, sticky="w", pady=5)
-        index_combo.bind("<<ComboboxSelected>>", lambda _event: setattr(self, "_project_index_language_auto", False))
-        ttk.Label(form, text="2 位语言代号；首次按 OCR 语言自动选择", foreground="#666666").grid(
-            row=3, column=1, sticky="w", padx=(120, 0), pady=5
-        )
-
-        ttk.Label(form, text="内容语言：").grid(row=4, column=0, sticky="e", padx=(0, 8), pady=5)
-        ttk.Combobox(
-            form, textvariable=content_var, values=PROJECT_LANGUAGE_CODES, state="readonly", width=12,
-        ).grid(row=4, column=1, sticky="w", pady=5)
-        ttk.Label(form, text="2 位语言代号", foreground="#666666").grid(
-            row=4, column=1, sticky="w", padx=(120, 0), pady=5
-        )
-
-        if "columns" not in self.vars:
-            self.vars["columns"] = tk.StringVar(value=str(self.parent.settings.columns))
-        ttk.Label(form, text="词典版面栏数：").grid(row=5, column=0, sticky="e", padx=(0, 8), pady=5)
-        ttk.Spinbox(form, textvariable=self.vars["columns"], from_=1, to=12, width=10).grid(
-            row=5, column=1, sticky="w", pady=5
-        )
-
-        page_range_var = tk.StringVar(value=str(self.parent.settings.dictionary_body_page_range))
-        self.vars["dictionary_body_page_range"] = page_range_var
-        ttk.Label(form, text="正文页码范围：").grid(row=6, column=0, sticky="e", padx=(0, 8), pady=5)
-        ttk.Entry(form, textvariable=page_range_var, width=24).grid(row=6, column=1, sticky="w", pady=5)
-        ttk.Label(form, text="例如：1-1250", foreground="#666666").grid(
-            row=6, column=1, sticky="w", padx=(205, 0), pady=5
-        )
-
-        ocr_var = self.vars.get("ocr_language")
-        if ocr_var is not None:
-            def sync_index_language(*_args) -> None:
-                if self._project_index_language_auto:
-                    mapped = project_language_from_ocr(str(ocr_var.get()))
-                    if mapped in PROJECT_LANGUAGE_CODES:
-                        index_var.set(mapped)
-
-            ocr_var.trace_add("write", sync_index_language)
-
-        ttk.Label(
+        _settings_project_ui.build_project_details_tab(
+            self,
             tab,
-            text="这些资料随当前项目保存在 _PictureCapture/settings.json 中。",
-            foreground="#666666",
-        ).grid(row=1, column=0, sticky="w", padx=18)
+            language_codes=PROJECT_LANGUAGE_CODES,
+            language_from_ocr=project_language_from_ocr,
+        )
 
     def _build_profile_tab(self, tab: ttk.Frame) -> None:
-        tab.columnconfigure(0, weight=1)
-        tab.rowconfigure(1, weight=1)
-        top = ttk.Frame(tab, padding=(14, 12, 14, 8))
-        top.grid(row=0, column=0, sticky="ew")
-        top.columnconfigure(1, weight=1)
-
-        selected_key = effective_project_profile_id(
-            self.parent.settings,
-            project_profile_path(self.parent.project.root) if self.parent.project else None,
-        )
-        try:
-            selected = dictionary_profile_preset(selected_key)
-        except Exception:
-            selected = dictionary_profile_preset(DEFAULT_PROFILE_ID)
-            selected_key = selected.key
-        self._active_profile_key = selected_key
-        self._profile_selection_changed = False
-        self.custom_profile_name_var = tk.StringVar(
-            value=str(getattr(self.parent.settings, "dictionary_custom_profile_name", "") or "")
-        )
-        self.vars["dictionary_custom_profile_name"] = self.custom_profile_name_var
-        self._profile_label_to_key = self._build_profile_choice_labels()
-        self.profile_choice_var = tk.StringVar(value=self._profile_label_for_key(selected_key))
-        ttk.Label(top, text="词头类型：").grid(row=0, column=0, sticky="e", padx=(0, 8), pady=4)
-        self.profile_combo = ttk.Combobox(
-            top, textvariable=self.profile_choice_var,
-            values=tuple(self._profile_label_to_key.keys()), state="readonly", width=44,
-        )
-        self.profile_combo.grid(row=0, column=1, sticky="ew", pady=4)
-        self.profile_combo.bind("<<ComboboxSelected>>", self._on_profile_selected)
-        ttk.Button(top, text="恢复 Profile 默认值", command=self.restore_profile_defaults).grid(
-            row=0, column=2, padx=(10, 0), pady=4
-        )
-
-        ttk.Label(top, text="自定义结构名称：").grid(
-            row=1, column=0, sticky="e", padx=(0, 8), pady=4
-        )
-        self.custom_profile_name_entry = ttk.Entry(
-            top, textvariable=self.custom_profile_name_var, width=32,
-        )
-        self.custom_profile_name_entry.grid(row=1, column=1, sticky="ew", pady=4)
-        ttk.Label(
-            top,
-            text="仅修改当前项目中“自定义结构”的显示名称；底层 Profile key 仍为 custom。",
-            foreground="#666666",
-        ).grid(row=1, column=2, columnspan=2, sticky="w", padx=(10, 0), pady=4)
-        self.custom_profile_name_var.trace_add(
-            "write", lambda *_args: self.after_idle(self._on_custom_profile_name_changed)
-        )
-
-        self.profile_description_var = tk.StringVar(value="")
-        self.profile_examples_var = tk.StringVar(value="")
-        self.profile_layout_summary_var = tk.StringVar(value="")
-        profile_description = ttk.Label(
-            top, textvariable=self.profile_description_var, justify="left"
-        )
-        profile_description.grid(
-            row=2, column=0, columnspan=4, sticky="ew", pady=(8, 2)
-        )
-        profile_examples = ttk.Label(
-            top, textvariable=self.profile_examples_var, justify="left"
-        )
-        profile_examples.grid(
-            row=3, column=0, columnspan=4, sticky="ew", pady=(2, 0)
-        )
-        self._bind_responsive_labels(
-            top,
-            profile_description,
-            profile_examples,
-            horizontal_padding=20,
-            min_wrap=180,
-        )
-        ttk.Label(
-            top, textvariable=self.profile_layout_summary_var,
-            font=("TkDefaultFont", 10, "bold"), foreground="#245a86",
-        ).grid(row=4, column=0, columnspan=4, sticky="w", pady=(5, 0))
-        self._sync_custom_profile_name_state()
-
-        profile_scroll_host = ttk.Frame(tab)
-        profile_scroll_host.grid(row=1, column=0, sticky="nsew")
-        profile_scroll_host.rowconfigure(0, weight=1)
-        profile_scroll_host.columnconfigure(0, weight=1)
-        profile_canvas = tk.Canvas(profile_scroll_host, highlightthickness=0, borderwidth=0)
-        self.profile_canvas = profile_canvas
-        profile_scrollbar = ttk.Scrollbar(
-            profile_scroll_host, orient="vertical", command=profile_canvas.yview,
-        )
-        profile_canvas.configure(yscrollcommand=profile_scrollbar.set)
-        profile_canvas.grid(row=0, column=0, sticky="nsew")
-        profile_scrollbar.grid(row=0, column=1, sticky="ns")
-        body = ttk.Frame(profile_canvas, padding=(14, 0, 14, 10))
-        profile_window = profile_canvas.create_window((0, 0), window=body, anchor="nw")
-
-        def _profile_sync_scrollregion(_event=None) -> None:
-            bbox = profile_canvas.bbox("all")
-            if bbox:
-                profile_canvas.configure(scrollregion=bbox)
-
-        def _profile_fit_width(event) -> None:
-            profile_canvas.itemconfigure(profile_window, width=event.width)
-
-        body.bind("<Configure>", _profile_sync_scrollregion)
-        profile_canvas.bind("<Configure>", _profile_fit_width)
-        body.columnconfigure(0, weight=1)
-        body.columnconfigure(1, weight=1)
-        field_meta = self._field_meta
-        for gi, (title, names) in enumerate(self.PROFILE_FIELD_GROUPS):
-            group = ttk.LabelFrame(body, text=title, padding=(10, 7))
-            group.grid(row=gi // 2, column=gi % 2, sticky="nsew", padx=(0 if gi % 2 == 0 else 6, 6 if gi % 2 == 0 else 0), pady=(0, 8))
-            group.columnconfigure(1, weight=1)
-            for row, name in enumerate(names):
-                label, _cast = field_meta[name]
-                ttk.Label(group, text=label).grid(row=row, column=0, sticky="e", padx=(0, 7), pady=3)
-                if name not in self.vars:
-                    self.vars[name] = tk.StringVar(value=str(getattr(self.parent.settings, name)))
-                var = self.vars[name]
-                if name == "ocr_language":
-                    widget = ttk.Combobox(group, textvariable=var, values=self.OCR_LANGUAGES, state="normal", width=24)
-                    widget.bind("<<ComboboxSelected>>", lambda _e: self._on_profile_language_changed())
-                    widget.bind("<FocusOut>", lambda _e: self._on_profile_language_changed())
-                    var.trace_add("write", lambda *_args: self.after_idle(self._refresh_sort_choices))
-                elif name == "layout_writing_mode":
-                    widget = ttk.Combobox(
-                        group, textvariable=var, values=("horizontal-tb", "vertical-rl", "vertical-lr"),
-                        state="readonly", width=24,
-                    )
-                    widget.bind("<<ComboboxSelected>>", lambda _e: self._sync_layout_semantics())
-                elif name == "layout_text_direction":
-                    widget = ttk.Combobox(group, textvariable=var, values=("ltr", "rtl"), state="readonly", width=24)
-                    widget.bind("<<ComboboxSelected>>", lambda _e: self._sync_layout_semantics())
-                elif name == "layout_columns_policy":
-                    widget = ttk.Combobox(group, textvariable=var, values=("detect", "fixed"), state="readonly", width=24)
-                elif name == "layout_column_separator_mode":
-                    widget = ttk.Combobox(group, textvariable=var, values=("auto", "present", "absent"), state="readonly", width=24)
-                elif name == "analysis_threshold_mode":
-                    widget = ttk.Combobox(group, textvariable=var, values=("auto", "otsu", "adaptive", "fixed"), state="readonly", width=24)
-                elif name == "layout_transform":
-                    widget = ttk.Entry(group, textvariable=var, width=24, state="readonly")
-                else:
-                    widget = ttk.Entry(group, textvariable=var, width=24)
-                widget.grid(row=row, column=1, sticky="ew", pady=3)
-                try:
-                    var.trace_add("write", lambda *_args: self.after_idle(self._refresh_profile_status))
-                except tk.TclError:
-                    pass
-
-        check_group = ttk.LabelFrame(body, text="识别行为", padding=(10, 7))
-        check_group.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(0, 8))
-        for row, (label, name) in enumerate(self.PROFILE_CHECKS):
-            if name not in self.vars:
-                self.vars[name] = tk.BooleanVar(value=bool(getattr(self.parent.settings, name)))
-            ttk.Checkbutton(check_group, text=label, variable=self.vars[name]).grid(row=row, column=0, sticky="w", pady=3)
-            try:
-                self.vars[name].trace_add("write", lambda *_args: self.after_idle(self._refresh_profile_status))
-            except tk.TclError:
-                pass
-
-        self.profile_status_var = tk.StringVar(value="")
-        status = ttk.Frame(tab, padding=(14, 0, 14, 10))
-        status.grid(row=2, column=0, sticky="ew")
-        ttk.Label(status, textvariable=self.profile_status_var).pack(side="left")
-        ttk.Label(
-            status,
-            text="Profile 默认值是起点；这里的手工调整会作为项目 overrides 保存，不会改写内置 Profile。",
-        ).pack(side="right")
-        self._refresh_profile_summary()
-        self.after_idle(self._refresh_profile_status)
+        _settings_profile_ui.build_profile_tab(self, tab)
 
     def _build_profile_choice_labels(self) -> dict[str, str]:
-        """Return numbered Profile labels, always keeping custom as the last item."""
-        profiles = list(available_dictionary_profiles())
-        profiles.sort(key=lambda profile: profile.key == "custom")
-        custom_name = (
-            str(self.custom_profile_name_var.get()).strip()
-            if hasattr(self, "custom_profile_name_var") else ""
-        )
-        labels: dict[str, str] = {}
-        for index, profile in enumerate(profiles, start=1):
-            display_name = profile.display_name
-            if profile.key == "custom" and custom_name:
-                display_name = f"{custom_name}（自定义）"
-            labels[f"{index}. {display_name}"] = profile.key
-        return labels
+        return _settings_profile_ui.build_profile_choice_labels(self)
 
     def _profile_label_for_key(self, key: str) -> str:
-        for label, value in self._profile_label_to_key.items():
-            if value == key:
-                return label
-        # Compatibility aliases use the display name of their visible base
-        # profile; map them back to that numbered visible choice.
-        try:
-            wanted_name = dictionary_profile_preset(key).display_name
-        except Exception:
-            wanted_name = ""
-        for label, value in self._profile_label_to_key.items():
-            try:
-                if dictionary_profile_preset(value).display_name == wanted_name:
-                    return label
-            except Exception:
-                continue
-        return next(iter(self._profile_label_to_key), "")
+        return _settings_profile_ui.profile_label_for_key(self, key)
 
     def _profile_display_name(self, key: str) -> str:
-        if key == "custom":
-            custom_name = str(self.custom_profile_name_var.get()).strip()
-            if custom_name:
-                return f"{custom_name}（自定义）"
-        return dictionary_profile_preset(key).display_name
+        return _settings_profile_ui.profile_display_name(self, key)
 
     def _sync_custom_profile_name_state(self) -> None:
-        if not hasattr(self, "custom_profile_name_entry"):
-            return
-        state = "normal" if self._current_profile_key() == "custom" else "disabled"
-        self.custom_profile_name_entry.configure(state=state)
+        _settings_profile_ui.sync_custom_profile_name_state(self)
 
     def _on_custom_profile_name_changed(self) -> None:
-        if not hasattr(self, "profile_combo"):
-            return
-        current_key = self._current_profile_key()
-        self._profile_label_to_key = self._build_profile_choice_labels()
-        self.profile_combo.configure(values=tuple(self._profile_label_to_key.keys()))
-        self.profile_choice_var.set(self._profile_label_for_key(current_key))
-        self._sync_custom_profile_name_state()
-        self._refresh_profile_summary()
-        self._refresh_profile_status()
+        _settings_profile_ui.on_custom_profile_name_changed(self)
 
     def _current_profile_key(self) -> str:
-        if hasattr(self, "profile_choice_var"):
-            return self._profile_label_to_key.get(
-                self.profile_choice_var.get(), self._active_profile_key or DEFAULT_PROFILE_ID
-            )
-        return str(self._active_profile_key or self.parent.settings.dictionary_profile_id or DEFAULT_PROFILE_ID)
+        return _settings_profile_ui.current_profile_key(self)
 
     def _refresh_profile_summary(self) -> None:
-        profile = dictionary_profile_preset(self._current_profile_key())
-        self.profile_description_var.set(profile.description)
-        try:
-            columns = max(1, int(self.vars.get("columns").get())) if self.vars.get("columns") else 1
-        except (TypeError, ValueError, tk.TclError):
-            columns = 1
-        layout = {
-            "writing_mode": str(self.vars.get("layout_writing_mode").get()) if self.vars.get("layout_writing_mode") else "horizontal-tb",
-            "text_direction": str(self.vars.get("layout_text_direction").get()) if self.vars.get("layout_text_direction") else "ltr",
-            "canonical_transform": str(self.vars.get("layout_transform").get()) if self.vars.get("layout_transform") else "identity",
-            "columns": columns,
-            "column_separator": str(self.vars.get("layout_column_separator_mode").get()) if self.vars.get("layout_column_separator_mode") else "auto",
-        }
-        language = str(self.vars.get("ocr_language").get()) if self.vars.get("ocr_language") else ""
-        self.profile_layout_summary_var.set(
-            f"{language} · {self._profile_display_name(profile.key)} · {profile_layout_summary(profile, layout)}"
-        )
-        if profile.examples:
-            names = "；".join(example.dictionary for example in profile.examples)
-            self.profile_examples_var.set(f"经典样例：{names}")
-        else:
-            self.profile_examples_var.set("经典样例：通用兼容型（当前未内置样页）")
+        _settings_profile_ui.refresh_profile_summary(self)
 
     def _coerce_profile_var(self, name: str):
-        var = self.vars.get(name)
-        if var is None:
-            return None
-        value = var.get()
-        if isinstance(var, tk.BooleanVar):
-            return bool(value)
-        cast = self._casts.get(name, str)
-        try:
-            return cast(value)
-        except Exception:
-            return value
+        return _settings_profile_ui.coerce_profile_var(self, name)
 
     def _refresh_profile_status(self) -> None:
-        if not hasattr(self, "profile_status_var"):
-            return
-        key = self._current_profile_key()
-        current_language = str(self.vars.get("ocr_language").get() if self.vars.get("ocr_language") else "")
-        defaults = profile_effective_settings(key, current_language=current_language)
-        changed = []
-        for name, expected in defaults.items():
-            if name not in self.vars:
-                continue
-            if self._coerce_profile_var(name) != expected:
-                changed.append(name)
-        suffix = "（使用预设默认值）" if not changed else f"（项目调整 {len(changed)} 项）"
-        self.profile_status_var.set(f"{self._profile_display_name(key)} {suffix}")
+        _settings_profile_ui.refresh_profile_status(self)
 
-    def _apply_profile_defaults_to_vars(self, key: str, *, keep_supported_language: bool = True) -> None:
-        current_language = ""
-        if keep_supported_language and self.vars.get("ocr_language") is not None:
-            current_language = str(self.vars["ocr_language"].get())
-        defaults = profile_effective_settings(key, current_language=current_language)
-        for name, value in defaults.items():
-            if name not in self.vars:
-                continue
-            self.vars[name].set(value)
-        self._active_profile_key = key
-        self._refresh_profile_summary()
-        self._on_profile_language_changed(update_profile_paddle=False)
-        self._refresh_profile_status()
+    def _apply_profile_defaults_to_vars(
+        self,
+        key: str,
+        *,
+        keep_supported_language: bool = True,
+    ) -> None:
+        _settings_profile_ui.apply_profile_defaults_to_vars(
+            self,
+            key,
+            keep_supported_language=keep_supported_language,
+        )
 
     def _on_profile_selected(self, _event=None) -> None:
-        key = self._current_profile_key()
-        self._profile_selection_changed = True
-        self._sync_custom_profile_name_state()
-        self._apply_profile_defaults_to_vars(key, keep_supported_language=True)
+        _settings_profile_ui.on_profile_selected(self, _event)
 
     def restore_profile_defaults(self) -> None:
-        self._apply_profile_defaults_to_vars(self._current_profile_key(), keep_supported_language=True)
+        _settings_profile_ui.restore_profile_defaults(self)
 
     def _on_profile_language_changed(self, update_profile_paddle: bool = True) -> None:
-        key = self._current_profile_key()
-        profile = dictionary_profile_preset(key)
-        language = str(self.vars.get("ocr_language").get() if self.vars.get("ocr_language") else "")
-        base = next((part.strip() for part in language.split("+") if part.strip()), "")
-        if update_profile_paddle and self.vars.get("paddle_language") is not None:
-            recommended = profile.paddle_language_by_language.get(base)
-            if recommended:
-                self.vars["paddle_language"].set(recommended)
-        writing = str(self.vars.get("layout_writing_mode").get()) if self.vars.get("layout_writing_mode") else "horizontal-tb"
-        for name, value in language_effective_settings(language, writing).items():
-            if name in self.vars and (update_profile_paddle or name != "paddle_language"):
-                self.vars[name].set(value)
-        self._refresh_sort_choices()
-        self._refresh_profile_summary()
-        self._refresh_profile_status()
+        _settings_profile_ui.on_profile_language_changed(
+            self, update_profile_paddle=update_profile_paddle
+        )
 
     def _sync_layout_semantics(self) -> None:
-        writing = str(self.vars["layout_writing_mode"].get())
-        direction = str(self.vars["layout_text_direction"].get())
-        transform = "rotate_ccw90" if writing == "vertical-rl" else "rotate_cw90" if writing == "vertical-lr" else "mirror_x" if direction == "rtl" else "identity"
-        self.vars["layout_transform"].set(transform)
-        self._on_profile_language_changed()
+        _settings_profile_ui.sync_layout_semantics(self)
 
     def _refresh_sort_choices(self, initial: bool = False) -> None:
-        if not hasattr(self, "sort_combo"):
-            return
-        language = str(self.vars.get("ocr_language").get() if self.vars.get("ocr_language") else self.parent.settings.ocr_language).strip() or "eng"
-        self.sort_language_var.set(language)
-        mapping = available_profile_labels(language)
-        self._sort_label_to_value = mapping
-        self.sort_combo.configure(values=tuple(mapping.keys()))
-        current_key = getattr(self.parent.settings, "headword_sort_mode", "auto") if initial else mapping.get(self.sort_mode_var.get(), "auto")
-        # Preserve a currently selected key only if it belongs to the new language-specific menu.
-        valid_values = set(mapping.values())
-        if current_key not in valid_values:
-            current_key = "auto"
-        label = next((label for label, value in mapping.items() if value == current_key), next(iter(mapping)))
-        self.sort_mode_var.set(label)
-        self._toggle_custom_sort_state()
+        _settings_profile_ui.refresh_sort_choices(self, initial=initial)
 
     def _toggle_custom_sort_state(self) -> None:
-        key = self._sort_label_to_value.get(self.sort_mode_var.get(), "auto")
-        state = "normal" if key == "custom" else "disabled"
-        self.custom_order_entry.configure(state=state)
-        self.custom_fold_check.configure(state=state)
+        _settings_profile_ui.toggle_custom_sort_state(self)
 
     def _browse_wordslist_setting(self, var: tk.StringVar) -> None:
-        initialdir = str(self.parent.project.root) if self.parent.project else None
-        current = str(var.get()).strip()
-        if self.parent.project and current:
-            try:
-                current_path = resolve_wordslist_path(self.parent.project.root, current)
-                if current_path.parent.exists():
-                    initialdir = str(current_path.parent)
-            except Exception:
-                pass
-        chosen = filedialog.askopenfilename(
-            parent=self, title="选择 wordslist 参考词表", initialdir=initialdir,
-            filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")],
-        )
-        if not chosen:
-            return
-        path = Path(chosen)
-        if self.parent.project:
-            try:
-                path_text = path.resolve().relative_to(self.parent.project.root.resolve()).as_posix()
-            except ValueError:
-                path_text = str(path.resolve())
-        else:
-            path_text = str(path)
-        var.set(path_text)
+        _settings_project_ui.browse_wordslist_setting(self, var)
 
     def _rules_path(self) -> Path | None:
-        if self.parent.project:
-            return headword_filter_rules_path(self.parent.project.root, HEADWORD_FILTER_RULES_FILENAME)
-        return None
+        return _settings_rules_ui.rules_path(self)
 
     def load_rules_editor(self) -> None:
-        path = self._rules_path()
-        if path and path.exists():
-            text, _encoding = read_text_detected(path)
-            self.rules_status_var.set(path.name)
-        else:
-            text = DEFAULT_HEADWORD_FILTER_RULES
-            self.rules_status_var.set("尚未保存，将在保存参数时创建规则文件")
-        self.rules_text.delete("1.0", "end"); self.rules_text.insert("1.0", text)
+        _settings_rules_ui.load_rules_editor(self)
 
     def restore_default_rules(self) -> None:
-        if not messagebox.askyesno("恢复默认规则", "将规则编辑框恢复为默认模板？保存参数前不会写入磁盘。", parent=self):
-            return
-        self.rules_text.delete("1.0", "end"); self.rules_text.insert("1.0", DEFAULT_HEADWORD_FILTER_RULES)
-        self.rules_status_var.set("已恢复默认模板（尚未保存）")
+        _settings_rules_ui.restore_default_rules(self)
 
     def import_rules(self) -> None:
-        path = filedialog.askopenfilename(parent=self, title="导入词头规则", filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")])
-        if not path:
-            return
-        try:
-            text, _encoding = read_text_detected(path); parse_headword_filter_rules(text, path)
-        except Exception as exc:
-            messagebox.showerror("规则无效", str(exc), parent=self); return
-        self.rules_text.delete("1.0", "end"); self.rules_text.insert("1.0", text)
-        self.rules_status_var.set(f"已导入 {Path(path).name}（尚未保存到项目）")
+        _settings_rules_ui.import_rules(self)
 
     def export_rules(self) -> None:
-        text = self.rules_text.get("1.0", "end-1c")
-        try:
-            parse_headword_filter_rules(text, "规则编辑框")
-        except Exception as exc:
-            messagebox.showerror("规则无效", str(exc), parent=self); return
-        path = filedialog.asksaveasfilename(parent=self, title="导出词头规则", defaultextension=".txt", initialfile=HEADWORD_FILTER_RULES_FILENAME, filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")])
-        if not path:
-            return
-        Path(path).write_text(text.rstrip() + "\n", encoding="utf-8")
-        self.rules_status_var.set(f"已导出 {Path(path).name}")
+        _settings_rules_ui.export_rules(self)
 
     def _schedule_autosave(self) -> None:
-        if not getattr(self, "_autosave_ready", False):
-            return
-        if hasattr(self, "_settings_save_status_var"):
-            self._settings_save_status_var.set("● 有改动，正在自动保存…")
-        job = getattr(self, "_autosave_job", None)
-        if job is not None:
-            try:
-                self.after_cancel(job)
-            except tk.TclError:
-                pass
-        self._autosave_job = self.after(450, self._run_autosave)
+        _settings_lifecycle_ui.schedule_autosave(self)
 
     def _run_autosave(self) -> None:
-        self._autosave_job = None
-        ok = self.save(close=False, show_errors=False)
-        if hasattr(self, "_settings_save_status_var"):
-            self._settings_save_status_var.set(
-                "✓ 已自动保存" if ok else "⚠ 当前输入暂未保存；关闭时会提示需要修正的项目"
-            )
+        _settings_lifecycle_ui.run_autosave(self)
 
     def _validate_settings_now(self) -> bool:
-        ok = self.save(close=False, show_errors=True)
-        if hasattr(self, "_settings_save_status_var"):
-            self._settings_save_status_var.set(
-                "✓ 当前设置有效并已保存" if ok else "⚠ 请修正无效设置"
-            )
-        return ok
+        return _settings_lifecycle_ui.validate_settings_now(self)
 
     def _close_validated(self) -> None:
-        job = getattr(self, "_autosave_job", None)
-        if job is not None:
-            try:
-                self.after_cancel(job)
-            except tk.TclError:
-                pass
-            self._autosave_job = None
-        self.save(close=True, show_errors=True)
+        _settings_lifecycle_ui.close_validated(self)
 
     def save(self, *, close: bool = True, show_errors: bool = True) -> bool:
         try:
@@ -3564,6 +2149,7 @@ class ReviewWindow(tk.Toplevel):
         )
         for _var in self.digit_map_vars:
             _var.trace_add("write", lambda *_args: self._save_digit_map())
+        initialize_review_entry_classification(self)
 
     def _configure_review_styles(self) -> None:
         """Configure dense, opt-in styles for the proofreading workspace only."""
@@ -3999,7 +2585,7 @@ class ReviewWindow(tk.Toplevel):
             return percent_spin
 
         self.review_line_height_spin = add_review_height_control(
-            "单行高：", self.review_line_height_var, self.review_line_height_px_var
+            "普通字/行高：", self.review_line_height_var, self.review_line_height_px_var
         )
         add_review_height_control(
             "行间空：",
@@ -4013,7 +2599,7 @@ class ReviewWindow(tk.Toplevel):
             self.review_regular_crop_height_px_var,
         )
         self.review_single_cjk_line_height_spin = add_review_height_control(
-            "单字行高：",
+            "大字头切图高：",
             self.review_single_cjk_line_height_var,
             self.review_single_cjk_line_height_px_var,
         )
@@ -6865,6 +5451,7 @@ class ReviewWindow(tk.Toplevel):
         self, *, focus_index: int | None = None, reset_scroll: bool = False,
     ) -> None:
         """Prepare proofreading crops off-thread; materialize Tk widgets only on Tk."""
+        sync_review_entry_classification(self)
         if getattr(self, "_filter_rows_active", False):
             return
         project = getattr(self.parent, "project", None)
@@ -7414,6 +6001,7 @@ class ReviewWindow(tk.Toplevel):
             self.locate_reference_word(self.vars[index].get(), index)
             self._refresh_cc_simplified_comparison(index)
             self._schedule_network_lookup(self.vars[index].get())
+        sync_review_entry_classification(self)
 
     def _scroll_editor_into_view(self, index: int) -> None:
         if not (0 <= index < len(self.editors)):
@@ -8139,6 +6727,7 @@ class PictureCaptureApp(tk.Tk):
         self._ui_worker_shutdown = False
         self._ui_close_requested = False
         self._pending_page_index: int | None = None
+        self.session_controller = SessionController(self)
         self._session_path = self._default_session_state_path()
         self._last_session = self._read_session_state()
         requested_appearance = normalize_appearance_preference(
@@ -8170,6 +6759,19 @@ class PictureCaptureApp(tk.Tk):
         self.section_title_font = font.nametofont("TkDefaultFont").copy()
         self.section_title_font.configure(weight="bold")
         self._configure_main_workspace_styles()
+        self.canvas_controller = CanvasController(self)
+        self.crop_controller = CropController(self)
+        self.detection_controller = DetectionController(self)
+        self.export_controller = ExportController(self)
+        self.headword_controller = HeadwordController(
+            self,
+            parse_words_of_pages_text=_parse_words_of_pages_text,
+            fill_page_entries=_fill_page_entries,
+        )
+        self.illustration_controller = IllustrationController(self)
+        self.project_controller = ProjectController(self)
+        self.page_controller = PageController(self)
+        self.review_controller = ReviewController(self)
         self._build_ui()
         self.bind_class("Toplevel", "<Map>", self._appearance_toplevel_mapped, add="+")
         self.set_appearance_mode(requested_appearance, persist=False)
@@ -8178,6 +6780,12 @@ class PictureCaptureApp(tk.Tk):
         self.after_idle(self._maximize_main_window)
         self.after_idle(self._ensure_sidebar_navigation_width)
         self.after_idle(self.restore_last_session)
+        attach_nonbmp_unicode_input(self)
+
+    def destroy(self) -> None:
+        close_nonbmp_unicode_input(self)
+        super().destroy()
+
 
     def _app_icon_toplevel_mapped(self, event: tk.Event) -> None:
         widget = getattr(event, "widget", None)
@@ -8954,71 +7562,16 @@ class PictureCaptureApp(tk.Tk):
 
     @staticmethod
     def _default_session_state_path() -> Path:
-        return user_config_root() / SESSION_STATE_FILENAME
+        return SessionController.default_state_path()
 
     def _read_session_state(self) -> dict:
-        candidates = (self._session_path, *legacy_user_config_files(SESSION_STATE_FILENAME))
-        for candidate in candidates:
-            try:
-                if candidate.exists():
-                    raw = json.loads(candidate.read_text(encoding="utf-8"))
-                    if isinstance(raw, dict):
-                        return raw
-            except (OSError, ValueError, TypeError):
-                continue
-        return {}
+        return self.session_controller.read_state()
 
     def _save_session_state(self) -> None:
-        try:
-            self._session_path.parent.mkdir(parents=True, exist_ok=True)
-            state = {
-                "last_project": str(self.project.root) if self.project else "",
-                "last_page": self.current_page.name if self.current_page else "",
-                "last_page_index": self.current_index,
-                "image_suffix": self.settings.image_suffix,
-                "page_range": self.page_range_var.get() if hasattr(self, "page_range_var") else "current",
-                "page_range_spec": self.page_range_spec_var.get() if hasattr(self, "page_range_spec_var") else "",
-                "view_zoom_percent": round(self.view_scale * 100),
-                "appearance_mode": self.appearance_preference,
-                "section_expanded": dict(self.section_expanded),
-            }
-            tmp = self._session_path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(self._session_path)
-            self._last_session = state
-        except OSError:
-            # Session restoration is a convenience feature; never block editing
-            # because a locked-down Windows profile cannot persist it.
-            pass
+        self.session_controller.save_state()
 
     def restore_last_session(self) -> None:
-        state = self._last_session or {}
-        root_text = str(state.get("last_project") or "").strip()
-        if not root_text:
-            return
-        root = Path(root_text).expanduser()
-        if not root.is_dir():
-            self.status_var.set(f"上次项目不可用：{root}")
-            return
-        if state.get("page_range") in {"current", "to_end", "specified"}:
-            self.page_range_var.set(str(state.get("page_range")))
-        self.page_range_spec_var.set(str(state.get("page_range_spec") or ""))
-        try:
-            zoom_value = state.get("view_zoom_percent")
-            try:
-                target_view_scale = min(3.0, max(0.08, float(zoom_value) / 100.0)) if zoom_value is not None else None
-            except (TypeError, ValueError):
-                target_view_scale = None
-            self.status_var.set(f"正在后台恢复上次项目：{root}")
-            self._load_project(
-                root,
-                requested_suffix=str(state.get("image_suffix") or "").strip() or None,
-                target_page=str(state.get("last_page") or "").strip() or None,
-                target_index=state.get("last_page_index"),
-                target_view_scale=target_view_scale,
-            )
-        except Exception as exc:
-            self.status_var.set(f"无法恢复上次项目：{exc}")
+        self.session_controller.restore_last_session()
 
     def on_close(self) -> None:
         if getattr(self, "_batch_active", False):
@@ -10562,6 +9115,7 @@ class PictureCaptureApp(tk.Tk):
         ttk.Entry(
             section_row, textvariable=section_width_var, width=4, justify="left"
         ).pack(side="left", padx=(2, 10))
+        add_ocr_crop_preview_control(self, section_row)
 
         line_row = ttk.Frame(aux); line_row.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(2, 0))
         ttk.Checkbutton(line_row, text="栏左垂线", variable=guide_var, command=self._quick_parameter_changed).pack(side="left")
@@ -10571,6 +9125,7 @@ class PictureCaptureApp(tk.Tk):
         ttk.Entry(
             line_row, textvariable=guide_value, width=5, justify="left"
         ).pack(side="left", padx=(2, 10))
+        add_quick_opacity_control(self, line_row, name="guide_opacity")
         ttk.Checkbutton(line_row, text="插图形状：轮廓", variable=self.polygon_var, command=self.redraw).pack(side="left")
         color_button(line_row, "illustration_outline_color")
         ttk.Label(line_row, text="粗细").pack(side="left")
@@ -10580,6 +9135,7 @@ class PictureCaptureApp(tk.Tk):
         ).pack(side="left", padx=(2, 5))
         ttk.Label(line_row, text="背景").pack(side="left")
         color_button(line_row, "illustration_fill_color")
+        add_quick_illustration_fill_opacity_control(self, line_row)
 
         marker_row = ttk.Frame(aux); marker_row.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(2, 0))
         ttk.Checkbutton(marker_row, text="词头横线", variable=marker_var, command=self._quick_parameter_changed).pack(side="left")
@@ -10589,6 +9145,7 @@ class PictureCaptureApp(tk.Tk):
         ttk.Entry(
             marker_row, textvariable=marker_value, width=5, justify="left"
         ).pack(side="left", padx=(2, 10))
+        add_quick_opacity_control(self, marker_row, name="headword_marker_opacity")
         label_visible_var = tk.BooleanVar(value=bool(self.settings.show_illustration_labels))
         self.quick_bool_vars["show_illustration_labels"] = label_visible_var
         ttk.Checkbutton(marker_row, text="插图标签：外框", variable=label_visible_var).pack(side="left")
@@ -10698,8 +9255,9 @@ class PictureCaptureApp(tk.Tk):
         ).pack(side="left")
 
         aux.columnconfigure(1, weight=1); aux.columnconfigure(3, weight=1)
+        add_layout_visualization_controls(self, aux)
 
-        ocr = self._section_frame(parent, "三、融合 / OCR画线参数", padding=5, section_key="ocr")
+        ocr = self._section_frame(parent, "三、共享 OCR 通道 / OCR画线", padding=5, section_key="ocr")
         ocr.pack(fill="x", pady=(4, 0))
         self.ocr_refresh_var = tk.StringVar(value="reuse")
         ttk.Label(ocr, text="识别策略：").grid(row=0, column=0, sticky="w")
@@ -10766,7 +9324,7 @@ class PictureCaptureApp(tk.Tk):
         actions.pack(fill="x", pady=(4, 0))
         action_tooltips = {
             "普通画线": "只运行高速左缘几何画线；适合正文缩进稳定的词典，不调用 OCR 来决定词条位置。",
-            "仅OCR": "只对已有画线做局部 PaddleOCR 文字识别；普通行与大字行使用不同高度框，不新增、删除或移动画线，默认仅填空白词条。",
+            "仅OCR": "只对已有画线调用共享 OCR 通道做局部文字识别；普通行与大字行使用不同高度框，不新增、删除或移动画线，默认仅填空白词条。",
             "融合画线+OCR": "普通几何与 OCR 候选先融合、救漏和去重，再对仍为空白的普通救漏线自动做局部 OCR 补字。",
             "OCR画线(默认)": "默认画线方式：由 OCR / parser / 视觉候选链识别词头并确定画线，同时得到 OCR 文字。",
             "清除画线": "清除当前页全部词条画线；不会删除扫描图片。",
@@ -10829,6 +9387,15 @@ class PictureCaptureApp(tk.Tk):
         )
         postproduction.pack(fill="x", pady=(4, 0))
         production_tooltips = {
+            "单行切图": (
+                "将【选定范围】内各页按校对界面相同的单行裁切逻辑批量输出到 QT/PSW；"
+                "可在【设置中心 → 切图】选择是否按页合并，并复用切图并行进程数。"
+            ),
+            "未画线行导出": (
+                "将【选定范围】内 Layout 已恢复、但当前 PDIC 没有横线的文字行导出到 QT/PSW_UNLINED。"
+                "可在【设置中心 → 切图】启用【未画线行导出过滤 → 空白】只检查近空白候选；"
+                "不以 entry/body 角色决定是否导出，并复用按页合并和切图并行进程设置。"
+            ),
             "词条切图": "按所选页面范围和【设置中心 → 切图】生成完整词条切图。",
             "插图切图": "按所选范围导出需要独立输出的 PPP 插图。",
             "项目详情": "编辑词典名称、语言、正文页码范围等项目级元数据。",
@@ -10837,7 +9404,7 @@ class PictureCaptureApp(tk.Tk):
             "导出训练标记包": "导出已人工确认的 PDIC/PPP、OCR候选和坐标上下文，供模型或规则验证。",
         }
         production_rows = [
-            (("词条切图", self.split_entries_selected_scope), ("插图切图", self.split_illustrations_selected_scope)),
+            (("单行切图", self.split_single_lines_selected_scope), ("未画线行导出", self.export_unlined_rows_selected_scope), ("词条切图", self.split_entries_selected_scope), ("插图切图", self.split_illustrations_selected_scope)),
             (("项目详情", self.open_project_details), ("导出PicDic索引", self.export_picdic_index), ("PicDic制作", self.build_picdic)),
             (("导出训练标记包", self.export_training_package),),
         ]
@@ -10848,6 +9415,10 @@ class PictureCaptureApp(tk.Tk):
                 row.columnconfigure(bi, weight=1, uniform=f"postproduction-row-{ri}")
             for bi, (text, command) in enumerate(specs):
                 button = self._sidebar_action_button(row, text, command)
+                if text == "单行切图":
+                    self._pc_single_line_crop_button = button
+                elif text == "未画线行导出":
+                    self._pc_unlined_export_button = button
                 tooltip = production_tooltips.get(text)
                 if tooltip:
                     self._attach_tooltip(button, tooltip)
@@ -12576,139 +11147,7 @@ class PictureCaptureApp(tk.Tk):
             self.show_error("保存当前页失败", exc)
 
     def export_training_package(self) -> None:
-        """Export saved PDIC pages plus OCR provenance as a reusable training package."""
-        if not self.project or self._batch_active:
-            if self._batch_active:
-                self.status_var.set("已有批量任务正在运行，请结束后再导出训练标记包。")
-            return
-        if any(
-            str(token[0]).startswith("training-cleanup-")
-            for token in self._ui_worker_active
-        ):
-            self.status_var.set("上一轮训练导出仍在清理临时文件；清理完成后再重新导出。")
-            return
-        try:
-            if self.current_page is not None and self.image is not None:
-                self._save_current_page_by_mode()
-        except Exception as exc:
-            self.show_error("导出前保存当前页失败", exc)
-            return
-
-        project = self.project
-        indices = [i for i, page in enumerate(project.images) if pdic_path(page).exists()]
-        if not indices:
-            messagebox.showinfo(
-                "导出训练标记包",
-                "当前项目没有已保存的 .pdic 页面。请先人工确认并保存画线结果。",
-                parent=self,
-            )
-            return
-        if not messagebox.askyesno(
-            "导出训练标记包",
-            f"将把 {len(indices)} 个已有 .pdic 的页面作为人工最终标注导出。\n\n"
-            "请确认这些页面的画线/词条文本已经人工校对。\n"
-            "原图、PDIC/PPP、OCR候选、原始/锚点/精修Y和人工覆盖记录都会一起保存。\n\n继续？",
-            parent=self,
-        ):
-            return
-
-        export_root = training_exports_root(project.root)
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        base_name = f"{project.root.name}_training_{stamp}"
-        staging = export_root / f".{base_name}_building"
-        zip_path = export_root / f"{base_name}.zip"
-        settings = replace(self.settings)
-        page_records: list[dict] = []
-        context_files: list[str] = []
-        items: list[object] = ["__prepare__"] + list(indices) + ["__finalize__"]
-
-        def cleanup_partial() -> None:
-            shutil.rmtree(staging, ignore_errors=True)
-            zip_path.with_name(f".{zip_path.name}.tmp").unlink(missing_ok=True)
-
-        def worker(item, _position: int, _total: int):
-            try:
-                if item == "__prepare__":
-                    export_root.mkdir(parents=True, exist_ok=True)
-                    cleanup_partial()
-                    staging.mkdir(parents=True, exist_ok=True)
-                    context_files[:] = copy_project_context(project.root, staging)
-                    return {"prepared": True}
-                if item == "__finalize__":
-                    from . import __version__
-                    if self._batch_stop_event.is_set():
-                        raise TrainingExportCancelled("训练标记包导出已停止")
-                    write_training_manifest(
-                        staging,
-                        project_name=project.root.name,
-                        settings=settings,
-                        pages=page_records,
-                        context_files=context_files,
-                        software_version=__version__,
-                    )
-                    make_training_zip(
-                        staging, zip_path,
-                        should_stop=self._batch_stop_event.is_set,
-                    )
-                    shutil.rmtree(staging, ignore_errors=True)
-                    return {"final_zip": str(zip_path)}
-                index = int(item)
-                record = export_training_page(
-                    project.images[index], project.root, settings, staging, index,
-                )
-                page_records.append(record)
-                return record
-            except TrainingExportCancelled:
-                cleanup_partial()
-                return {"cancelled": True}
-            except Exception:
-                cleanup_partial()
-                raise
-
-        def labeler(item) -> str:
-            if item == "__prepare__":
-                return "准备 staging 并复制项目上下文"
-            if item == "__finalize__":
-                return "生成 dataset_manifest.json 和 ZIP"
-            return project.images[int(item)].name
-
-        def done(_completed, _total, stopped, results, error):
-            if error is not None:
-                return
-            produced = next(
-                (str(row.get("final_zip")) for row in reversed(results)
-                 if isinstance(row, dict) and row.get("final_zip")),
-                "",
-            )
-            if produced:
-                self.status_var.set(f"训练标记包已导出：{Path(produced).name}")
-                messagebox.showinfo(
-                    "导出训练标记包完成",
-                    f"已导出 {len(page_records)} 页。\n\n{produced}",
-                    parent=self,
-                )
-                return
-            if stopped:
-                self.status_var.set("训练标记包已停止；正在后台清理 staging…")
-
-                def cleanup_worker():
-                    cleanup_partial()
-                    return True
-
-                def cleanup_done(_result) -> None:
-                    if self.project is project:
-                        self.status_var.set("训练标记包导出已停止；未生成不完整数据包。")
-
-                self._start_ui_worker(
-                    f"training-cleanup-{base_name}",
-                    cleanup_worker, cleanup_done,
-                    lambda exc, detail: print(detail or str(exc)),
-                    wait_on_close=True,
-                )
-
-        self._start_batch_task(
-            "导出训练标记包", items, worker, done, item_label=labeler,
-        )
+        self._export_controller_for_call().export_training_package()
 
     def show_help_dialog(self) -> None:
         existing = self.__dict__.get("_usage_guide_window")
@@ -14308,72 +12747,20 @@ class PictureCaptureApp(tk.Tk):
         widget.bind("<Leave>", hide, add="+")
         widget.bind("<Destroy>", hide, add="+")
 
+    def _project_controller_for_call(self) -> ProjectController:
+        controller = self.__dict__.get("project_controller")
+        if controller is None:
+            controller = ProjectController(self)
+            self.__dict__["project_controller"] = controller
+        return controller
+
     def _choose_new_project_image_suffix(self, root: Path) -> str | None:
-        """Choose the scan-image extension once when creating a project.
+        return self._project_controller_for_call().choose_new_project_image_suffix(root)
 
-        The native directory chooser cannot filter by file extension.  After the
-        user selects a folder, inspect its actual page images instead: one
-        detected extension is accepted automatically; multiple extensions ask
-        the user which set belongs to this project.
-        """
-        pages = project_page_images(root)
-        if not pages:
-            raise ValueError("所选目录中没有 tif/tiff/png/jpg/jpeg/bmp 扫描图片。")
-
-        counts: dict[str, int] = {}
-        for page in pages:
-            suffix = page.suffix.lower()
-            counts[suffix] = counts.get(suffix, 0) + 1
-        suffixes = sorted(counts, key=lambda item: (-counts[item], item))
-        if len(suffixes) == 1:
-            return suffixes[0]
-
-        choices = "，".join(f"{suffix}（{counts[suffix]} 张）" for suffix in suffixes)
-        initial = suffixes[0]
-        while True:
-            value = simpledialog.askstring(
-                "选择扫描图片格式",
-                "检测到该文件夹包含多种扫描图片格式：\n"
-                f"{choices}\n\n"
-                "请输入本项目要使用的图片后缀（例如 .png 或 .tif）：",
-                initialvalue=initial,
-                parent=self,
-            )
-            if value is None:
-                return None
-            suffix = self._normalize_suffix(value)
-            if suffix in counts:
-                return suffix
-            messagebox.showerror(
-                "图片格式不存在",
-                f"该文件夹中没有 {suffix} 扫描图片。\n可选格式：{', '.join(suffixes)}",
-                parent=self,
-            )
-            initial = suffix
 
     def open_project(self) -> None:
-        chosen = filedialog.askdirectory(title="选择词典扫描项目目录")
-        if not chosen:
-            return
-        try:
-            if is_managed_project(Path(chosen)) and not messagebox.askyesno(
-                "既有项目", "此目录已经包含 Picture Capture 项目资料。是否作为既有项目打开？", parent=self,
-            ):
-                return
-            root = Path(chosen)
-            existing_project = is_managed_project(root) or has_legacy_project_data(root)
-            requested_suffix = None
-            if not existing_project:
-                requested_suffix = self._choose_new_project_image_suffix(root)
-                if requested_suffix is None:
-                    return
-            self._load_project(
-                root,
-                requested_suffix=requested_suffix,
-                launch_profile_setup=not existing_project,
-            )
-        except Exception as exc:
-            self.show_error("无法打开项目", exc)
+        self._project_controller_for_call().open_project()
+
 
     def _load_project(
         self, root: Path, *, requested_suffix: str | None = None,
@@ -14739,101 +13126,18 @@ class PictureCaptureApp(tk.Tk):
         )
 
     def on_page_select(self, _event: tk.Event) -> None:
-        if (
-            getattr(self, "_batch_active", False)
-            and not self._batch_foreground_pages
-            and not getattr(self, "_batch_allow_page_navigation", False)
-        ):
-            if self.current_index >= 0:
-                self._set_page_list_selection(self.current_index, ensure_visible=True)
-            self.status_var.set("当前批量任务运行中，暂不允许切换页面；可先暂停/停止。")
-            return
-        selection = tuple(self.page_list.selection())
-        if not selection:
-            return
-        focused = self.page_list.focus()
-        chosen = focused if focused in selection else selection[-1]
-        try:
-            index = int(chosen)
-        except (TypeError, ValueError):
-            return
-        if index != self.current_index:
-            self._request_page_load(index)
-        else:
-            self._pending_page_index = None
-            self._invalidate_ui_worker("page-load")
+        self.page_controller.on_page_select(_event)
 
     def _request_page_load(
         self, index: int, *, reset_zoom: bool = False,
         current_already_saved: bool = False, force: bool = False,
     ) -> bool:
-        """Decode/read a target page off-thread, then commit it on the Tk thread."""
-        if not self.project or not (0 <= index < len(self.project.images)):
-            return False
-        if index == self.current_index and self.image is not None and not force:
-            self._pending_page_index = None
-            self._invalidate_ui_worker("page-load")
-            self._set_page_list_selection(index, ensure_visible=True)
-            return True
-        if self._pending_page_index == index and not force:
-            return True
-        project = self.project
-        page = project.images[index]
-        project_root = project.root
-        view_scale = float(self.view_scale)
-        appearance_mode = self.appearance_mode
-        self._pending_page_index = index
-        self.status_var.set(f"正在后台加载 {page.name}…")
-
-        def worker():
-            with Image.open(page) as opened:
-                image = normalize_page_rgb(opened)
-            entries = read_pdic(pdic_path(page))
-            polygons = read_ppp(ppp_read_path_for_image(page))
-            page_sections = read_page_sections(page)
-            cache_path = ocr_cache_root(project_root) / f"{page.stem}.json"
-            ocr_payload: dict = {}
-            if cache_path.exists():
-                try:
-                    loaded = json.loads(cache_path.read_text(encoding="utf-8"))
-                    if isinstance(loaded, dict):
-                        ocr_payload = loaded
-                except Exception:
-                    ocr_payload = {}
-            display_size = (
-                max(1, round(image.width * view_scale)),
-                max(1, round(image.height * view_scale)),
-            )
-            display_image = themed_display_image(
-                image.resize(display_size, Image.Resampling.LANCZOS),
-                appearance_mode,
-            )
-            return {
-                "project_root": str(project_root), "index": index, "image": image,
-                "entries": entries, "polygons": polygons, "page_sections": page_sections,
-                "ocr_payload": ocr_payload,
-                "display_size": display_size, "display_image": display_image,
-                "view_scale": view_scale,
-            }
-
-        def done(payload) -> None:
-            if self.project is not project:
-                return
-            self._pending_page_index = None
-            self.load_page(
-                index, reset_zoom=reset_zoom, preloaded=payload,
-                skip_current_save=current_already_saved,
-            )
-
-        def failed(exc, detail) -> None:
-            if detail:
-                print(detail)
-            if self.project is project:
-                self._pending_page_index = None
-                self.show_error(f"加载页面失败：{page.name}", exc)
-
-        self._start_ui_worker("page-load", worker, done, failed)
-        return True
+        return self.page_controller.request_page_load(
+            index,
+            reset_zoom=reset_zoom,
+            current_already_saved=current_already_saved,
+            force=force,
+        )
 
     def load_page(
         self, index: int, reset_zoom: bool = False, *,
@@ -14943,30 +13247,12 @@ class PictureCaptureApp(tk.Tk):
         self, delta: int, *, preloaded: dict | None = None,
         current_already_saved: bool = False, async_allowed: bool = True,
     ) -> bool:
-        if (
-            getattr(self, "_batch_active", False)
-            and not self._batch_foreground_pages
-            and not getattr(self, "_batch_allow_page_navigation", False)
-        ):
-            self.status_var.set("当前批量任务运行中，暂不允许切换页面；可先暂停/停止。")
-            return False
-        if not self.project:
-            return False
-        base_index = self._pending_page_index if self._pending_page_index is not None else self.current_index
-        target = base_index + delta
-        if not 0 <= target < len(self.project.images):
-            if not current_already_saved and self._can_save_current_during_batch_navigation():
-                self._save_current_page_by_mode()
-            self.status_var.set("已经到起始页" if target < 0 else "已经到最末页")
-            return False
-        if preloaded is None and async_allowed:
-            return self._request_page_load(
-                target, current_already_saved=current_already_saved,
-            )
-        self.load_page(
-            target, preloaded=preloaded, skip_current_save=current_already_saved,
+        return self.page_controller.change_page(
+            delta,
+            preloaded=preloaded,
+            current_already_saved=current_already_saved,
+            async_allowed=async_allowed,
         )
-        return True
 
     def _get_cached_display_photo(self, size: tuple[int, int]) -> ImageTk.PhotoImage:
         """Return the resized page image for the current page/zoom.
@@ -14990,66 +13276,32 @@ class PictureCaptureApp(tk.Tk):
             self._display_photo_cache_key = key
         return self.photo
 
+    def _canvas_controller_for_call(self) -> CanvasController:
+        controller = self.__dict__.get("canvas_controller")
+        if controller is None:
+            controller = CanvasController(self)
+            self.__dict__["canvas_controller"] = controller
+        return controller
+
     def _display_mode_from_flags(self) -> str:
-        """Return the compact viewer mode represented by the existing flags."""
-        if self.crop_preview_var.get():
-            return "切图预览"
-        binary = bool(self.binary_preview_var.get())
-        hidden = bool(self.hide_var.get())
-        if hidden:
-            return "仅二值" if binary else "仅原图"
-        return "二值+标注" if binary else "原图+标注"
+        return self._canvas_controller_for_call().display_mode_from_flags()
+
 
     def _sync_display_mode_from_flags(self) -> None:
-        if getattr(self, "_display_mode_syncing", False):
-            return
-        try:
-            self._display_mode_syncing = True
-            self.display_mode_var.set(self._display_mode_from_flags())
-        finally:
-            self._display_mode_syncing = False
+        self._canvas_controller_for_call().sync_display_mode_from_flags()
+
 
     def _apply_display_mode(self, _event=None) -> None:
-        """Apply one of the practical combinations already supported by the viewer."""
-        states = {
-            "原图+标注": (False, False, False),
-            "二值+标注": (True, False, False),
-            "仅原图": (False, True, False),
-            "仅二值": (True, True, False),
-            "切图预览": (False, False, True),
-        }
-        mode = str(self.display_mode_var.get() or "原图+标注")
-        binary, hidden, crop_preview = states.get(mode, states["原图+标注"])
-        previous_binary = bool(self.binary_preview_var.get())
-        try:
-            self._display_mode_syncing = True
-            self.binary_preview_var.set(binary)
-            self.hide_var.set(hidden)
-            self.crop_preview_var.set(crop_preview)
-        finally:
-            self._display_mode_syncing = False
-        if previous_binary != binary:
-            self.photo = None
-            self._display_photo_cache_key = None
-        if crop_preview:
-            self.status_var.set(
-                "切图预览：普通编辑线框已临时隐藏；切回其他显示模式即可恢复编辑。"
-            )
-        self.redraw()
+        self._canvas_controller_for_call().apply_display_mode(_event)
+
 
     def _toggle_binary_preview(self) -> None:
-        """Invalidate only the canvas bitmap; source/OCR geometry stays intact."""
-        self.photo = None
-        self._display_photo_cache_key = None
-        self._sync_display_mode_from_flags()
-        self.redraw()
+        self._canvas_controller_for_call().toggle_binary_preview()
+
 
     def _toggle_hide_overlays(self) -> None:
-        """Keep the legacy overlay switch and the page-toolbar mode selector aligned."""
-        if self.hide_var.get() and self.crop_preview_var.get():
-            self.crop_preview_var.set(False)
-        self._sync_display_mode_from_flags()
-        self.redraw()
+        self._canvas_controller_for_call().toggle_hide_overlays()
+
 
     def _current_effective_profile_settings(self) -> AppSettings:
         """Resolve the current page's Project Profile template without mutating project settings."""
@@ -15133,13 +13385,17 @@ class PictureCaptureApp(tk.Tk):
             else self.settings.show_headword_markers
         )
         if show_markers:
-            item = self.canvas.create_line(
-                marker_start[0] * self.view_scale,
-                marker_start[1] * self.view_scale,
-                marker_end[0] * self.view_scale,
-                marker_end[1] * self.view_scale,
+            item = create_alpha_canvas_line(
+                self,
+                (
+                    marker_start[0] * self.view_scale,
+                    marker_start[1] * self.view_scale,
+                    marker_end[0] * self.view_scale,
+                    marker_end[1] * self.view_scale,
+                ),
                 fill=self.settings.headword_marker_color,
                 width=marker_line_width,
+                opacity=self.settings.headword_marker_opacity,
             )
             record["canvas_items"].append(item)
 
@@ -15402,7 +13658,9 @@ class PictureCaptureApp(tk.Tk):
         if not record:
             return
         widgets = list(record.get("widgets") or [])
-        for item in list(record.get("canvas_items") or []):
+        canvas_items = list(record.get("canvas_items") or [])
+        release_alpha_line_photos(self, canvas_items)
+        for item in canvas_items:
             try:
                 self.canvas.delete(item)
             except tk.TclError:
@@ -15487,20 +13745,8 @@ class PictureCaptureApp(tk.Tk):
             self._set_idle_cursor_status()
 
     def _toggle_crop_preview(self) -> None:
-        """Switch between the editable overlays and the complete crop-plan preview."""
-        if self.crop_preview_var.get():
-            # Crop-plan preview is a distinct mode; keep it on the original page
-            # background and ignore the ordinary overlay-hiding state.
-            if self.binary_preview_var.get():
-                self.binary_preview_var.set(False)
-                self.photo = None
-                self._display_photo_cache_key = None
-            self.hide_var.set(False)
-            self.status_var.set(
-                "切图预览：普通编辑线框已临时隐藏；关闭预览即可恢复编辑。"
-            )
-        self._sync_display_mode_from_flags()
-        self.redraw()
+        self._canvas_controller_for_call().toggle_crop_preview()
+
 
     def _current_page_crop_plan(self):
         if self.image is None or self.current_page is None:
@@ -15525,6 +13771,7 @@ class PictureCaptureApp(tk.Tk):
     def _draw_crop_plan_preview(self) -> None:
         """Overlay the exact entry/PPP crop plan on the main page image."""
         if self.image is None:
+            draw_layout_visualization_if_enabled(self)
             return
         try:
             plan = self._current_page_crop_plan()
@@ -15600,134 +13847,28 @@ class PictureCaptureApp(tk.Tk):
         )
 
     def _rulers_visible(self) -> bool:
-        if self.image is None:
-            return False
-        visible = (
-            self.quick_bool_vars.get("show_rulers").get()
-            if hasattr(self, "quick_bool_vars") and "show_rulers" in self.quick_bool_vars
-            else bool(getattr(self.settings, "show_rulers", False))
-        )
-        return bool(visible) and not bool(self.hide_var.get())
+        return self._canvas_controller_for_call().rulers_visible()
+
 
     def _draw_percentage_rulers(self, geometry=None) -> None:
-        """Draw four fixed percentage rulers on the page edges."""
-        _ = geometry
-        if not self._rulers_visible() or self.image is None:
-            return
-        display_width = float(max(1, self.image.width - 1)) * self.view_scale
-        display_height = float(max(1, self.image.height - 1)) * self.view_scale
-        color = str(getattr(self.settings, "ruler_color", "#1976d2") or "#1976d2")
-        margin = 28
-        margin_color = str(
-            getattr(self, "_main_ui_colors", {}).get(
-                "ruler_margin",
-                "#20252b" if self.appearance_mode == "dark" else "#f1f3f6",
-            )
-        )
-        # Only the out-of-image ruler gutters get this background.  The page
-        # image and the rest of the canvas keep their existing colours.
-        self.canvas.create_rectangle(
-            -margin, 0, 0, display_height + margin,
-            fill=margin_color, outline="", tags=("ruler-margin",),
-        )
-        self.canvas.create_rectangle(
-            display_width, 0, display_width + margin, display_height + margin,
-            fill=margin_color, outline="", tags=("ruler-margin",),
-        )
-        self.canvas.create_rectangle(
-            0, display_height, display_width, display_height + margin,
-            fill=margin_color, outline="", tags=("ruler-margin",),
-        )
+        self._canvas_controller_for_call().draw_percentage_rulers(geometry)
 
-        major_tick = 7
-        minor_tick = 4
-        label_gap = major_tick + 2
-        font_spec = ("TkDefaultFont", 8)
-
-        for ruler_id, y in (("top", 0.0), ("bottom", display_height)):
-            tags = ("measurement-ruler", "ruler-horizontal", f"ruler-{ruler_id}")
-            self.canvas.create_line(
-                0, y, display_width, y,
-                fill=color, width=1, tags=tags,
-            )
-            for half_percent in range(201):
-                pct = half_percent * 0.5
-                x = display_width * pct / 100.0
-                tick = major_tick if half_percent % 2 == 0 else minor_tick
-                self.canvas.create_line(
-                    x, y - tick, x, y + tick,
-                    fill=color, width=1, tags=tags,
-                )
-            for value in range(5, 100, 5):
-                x = display_width * value / 100.0
-                self.canvas.create_text(
-                    x, y + label_gap, text=str(value), fill=color,
-                    anchor="n", font=font_spec, tags=tags,
-                )
-
-        for ruler_id, x in (("left", 0.0), ("right", display_width)):
-            tags = ("measurement-ruler", "ruler-vertical", f"ruler-{ruler_id}")
-            self.canvas.create_line(
-                x, 0, x, display_height,
-                fill=color, width=1, tags=tags,
-            )
-            for half_percent in range(201):
-                pct = half_percent * 0.5
-                y = display_height * pct / 100.0
-                tick = major_tick if half_percent % 2 == 0 else minor_tick
-                self.canvas.create_line(
-                    x - tick, y, x + tick, y,
-                    fill=color, width=1, tags=tags,
-                )
-            label_x = x - label_gap if ruler_id == "left" else x + label_gap
-            anchor = "e" if ruler_id == "left" else "w"
-            for value in range(5, 100, 5):
-                y = display_height * value / 100.0
-                self.canvas.create_text(
-                    label_x, y, text=str(value), fill=color,
-                    anchor=anchor, font=font_spec, tags=tags,
-                )
 
     def _ruler_hit_id(self, source_x: float, source_y: float) -> str | None:
-        if not self._rulers_visible() or self.image is None:
-            return None
-        max_x = float(max(1, self.image.width - 1))
-        max_y = float(max(1, self.image.height - 1))
-        tolerance = max(3.0, 8.0 / max(0.05, float(self.view_scale)))
-        distances = {
-            "top": abs(float(source_y)),
-            "bottom": abs(float(source_y) - max_y),
-            "left": abs(float(source_x)),
-            "right": abs(float(source_x) - max_x),
-        }
-        ruler_id, distance = min(distances.items(), key=lambda item: item[1])
-        return ruler_id if distance <= tolerance else None
+        return self._canvas_controller_for_call().ruler_hit_id(source_x, source_y)
+
 
     def _hide_ruler_hint(self) -> None:
-        popup = getattr(self, "_ruler_hint", None)
-        if popup is not None:
-            try:
-                popup.destroy()
-            except tk.TclError:
-                pass
-        self._ruler_hint = None
+        self._canvas_controller_for_call().hide_ruler_hint()
+
 
     def _show_ruler_hint(self, event: tk.Event) -> None:
-        text = "标尺可以帮助版面参数的手动填写。"
-        popup = getattr(self, "_ruler_hint", None)
-        if popup is None:
-            popup = tk.Toplevel(self.canvas)
-            popup.wm_overrideredirect(True)
-            ttk.Label(
-                popup, text=text, padding=(7, 4), relief="solid",
-            ).pack()
-            self._ruler_hint = popup
-        try:
-            popup.wm_geometry(f"+{event.x_root + 14}+{event.y_root + 18}")
-        except tk.TclError:
-            self._ruler_hint = None
+        self._canvas_controller_for_call().show_ruler_hint(event)
+
 
     def redraw(self) -> None:
+        clear_alpha_line_photos(self)
+        clear_alpha_polygon_records(self)
         self._sync_polygon_label_texts()
         self.canvas.delete("all")
         for widget in self.overlay_widgets:
@@ -15743,6 +13884,7 @@ class PictureCaptureApp(tk.Tk):
         size = (max(1, round(self.image.width * self.view_scale)), max(1, round(self.image.height * self.view_scale)))
         if self._preprocess_mode_active():
             self._redraw_preprocess_preview(size)
+            draw_layout_visualization_if_enabled(self)
             return
         photo = self._get_cached_display_photo(size)
         self.canvas.create_image(0, 0, image=photo, anchor="nw", tags="page")
@@ -15757,6 +13899,8 @@ class PictureCaptureApp(tk.Tk):
             )
             if self.cursor_canvas_xy is not None:
                 self.draw_cursor_guides(*self.cursor_canvas_xy)
+            draw_ocr_crop_preview(self)
+            draw_layout_visualization_if_enabled(self)
             return
         hidden = self.hide_var.get()
         if not hidden:
@@ -15773,10 +13917,12 @@ class PictureCaptureApp(tk.Tk):
                     source_points = [geometry.canonical_to_source(x, y) for y, x in path.points]
                     coords = [coordinate * self.view_scale for point in source_points for coordinate in point]
                     if len(coords) >= 4:
-                        self.canvas.create_line(
-                            *coords,
+                        create_alpha_canvas_line(
+                            self,
+                            tuple(coords),
                             fill=self.settings.guide_color,
                             width=scaled_overlay_line_width(self.settings.guide_width, overlay_scale),
+                            opacity=self.settings.guide_opacity,
                             smooth=True,
                         )
             self._draw_page_sections(geometry)
@@ -15845,10 +13991,13 @@ class PictureCaptureApp(tk.Tk):
                     continue
                 polygon_item = None
                 if show_shapes:
-                    polygon_item = self.canvas.create_polygon(
-                        coords, fill=self.settings.illustration_fill_color, stipple="gray50",
+                    polygon_item = create_alpha_canvas_polygon(
+                        self,
+                        tuple(coords),
                         outline=self.settings.illustration_outline_color,
+                        fill=self.settings.illustration_fill_color,
                         width=scaled_overlay_line_width(self.settings.illustration_outline_width, overlay_scale),
+                        opacity=self.settings.illustration_fill_opacity,
                         tags=("ppp-overlay", f"ppp-region-{region_index}"),
                     )
                 handles: list[int] = []
@@ -15941,105 +14090,60 @@ class PictureCaptureApp(tk.Tk):
             self.draw_cursor_guides(*self.cursor_canvas_xy)
 
         self._apply_current_appearance(self.canvas)
+        draw_ocr_crop_preview(self)
+        draw_layout_visualization_if_enabled(self)
 
     def _update_view_zoom_label(self) -> None:
-        if hasattr(self, "view_zoom_var"):
-            self.view_zoom_var.set(f"{round(self.view_scale * 100):d}%")
+        self._canvas_controller_for_call().update_view_zoom_label()
+
 
     def zoom(self, factor: float) -> None:
-        if self.image:
-            self.view_scale = min(3.0, max(0.08, self.view_scale * factor))
-            self._update_view_zoom_label()
-            self.redraw()
-            self._set_idle_cursor_status()
+        self._canvas_controller_for_call().zoom(factor)
+
 
     def apply_view_zoom_text(self, _event=None) -> None:
-        if not self.image:
-            return
-        try:
-            percent = float(self.view_zoom_var.get().strip().rstrip("%"))
-        except ValueError:
-            self._update_view_zoom_label()
-            return
-        self.view_scale = min(3.0, max(0.08, percent / 100.0))
-        self._update_view_zoom_label()
-        self.redraw()
-        self._set_idle_cursor_status()
+        self._canvas_controller_for_call().apply_view_zoom_text(_event)
+
 
     def fit_page_width(self) -> None:
-        if not self.image:
-            return
-        self.update_idletasks()
-        available = max(120, self.canvas.winfo_width() - 24)
-        self.view_scale = min(3.0, max(0.08, available / self.image.width))
-        self._update_view_zoom_label()
-        self.redraw()
-        self._set_idle_cursor_status()
-        self.canvas.xview_moveto(0.0)
+        self._canvas_controller_for_call().fit_page_width()
+
 
     def fit_page_height(self) -> None:
-        if not self.image:
-            return
-        self.update_idletasks()
-        available = max(120, self.canvas.winfo_height() - 24)
-        self.view_scale = min(3.0, max(0.08, available / self.image.height))
-        self._update_view_zoom_label()
-        self.redraw()
-        self._set_idle_cursor_status()
-        self.canvas.yview_moveto(0.0)
+        self._canvas_controller_for_call().fit_page_height()
+
 
     def canvas_mousewheel(self, event: tk.Event) -> str:
-        step = -1 if event.delta > 0 else 1
-        self.canvas.yview_scroll(step * 3, "units")
-        return "break"
+        return self._canvas_controller_for_call().canvas_mousewheel(event)
+
 
     def canvas_shift_mousewheel(self, event: tk.Event) -> str:
-        step = -1 if event.delta > 0 else 1
-        self.canvas.xview_scroll(step * 3, "units")
-        return "break"
+        return self._canvas_controller_for_call().canvas_shift_mousewheel(event)
+
 
     def canvas_ctrl_mousewheel(self, event: tk.Event) -> str:
-        self.zoom(1.15 if event.delta > 0 else 0.87)
-        return "break"
+        return self._canvas_controller_for_call().canvas_ctrl_mousewheel(event)
+
 
     def canvas_linux_mousewheel(self, event: tk.Event, step: int) -> str:
-        if event.state & 0x0004:
-            self.zoom(0.87 if step > 0 else 1.15)
-        elif event.state & 0x0001:
-            self.canvas.xview_scroll(step * 3, "units")
-        else:
-            self.canvas.yview_scroll(step * 3, "units")
-        return "break"
+        return self._canvas_controller_for_call().canvas_linux_mousewheel(event, step)
+
 
     def original_xy(self, event: tk.Event) -> tuple[int, int]:
-        return round(self.canvas.canvasx(event.x) / self.view_scale), round(self.canvas.canvasy(event.y) / self.view_scale)
+        return self._canvas_controller_for_call().original_xy(event)
+
 
     def draw_cursor_guides(self, canvas_x: float, canvas_y: float) -> None:
-        """Draw the blue dashed crosshair in the current canvas view."""
-        self.canvas.delete("cursor-guide")
-        if self.image is None or self._section_editing:
-            return
-        width = self.image.width * self.view_scale
-        height = self.image.height * self.view_scale
-        if not (0 <= canvas_x < width and 0 <= canvas_y < height):
-            return
-        style = dict(fill="#1976d2", width=1, dash=(4, 4), tags=("cursor-guide",))
-        self.canvas.create_line(0, canvas_y, width, canvas_y, **style)
-        self.canvas.create_line(canvas_x, 0, canvas_x, height, **style)
-        self.canvas.tag_raise("cursor-guide")
+        self._canvas_controller_for_call().draw_cursor_guides(canvas_x, canvas_y)
+
 
     def canvas_leave(self, _event: tk.Event) -> None:
-        self.cursor_canvas_xy = None
-        self.canvas.delete("cursor-guide")
-        self._hide_ruler_hint()
-        self._set_idle_cursor_status()
+        self._canvas_controller_for_call().canvas_leave(_event)
+
 
     def _set_idle_cursor_status(self) -> None:
-        zoom = round(self.view_scale * 100)
-        if self._preprocess_mode_active():
-            self.cursor_status_var.set(f"坐标：—｜预处理预览｜缩放 {zoom}%")
-        else:
-            self.cursor_status_var.set(f"坐标：—｜缩放 {zoom}%｜词条 {len(self.entries)}")
+        self._canvas_controller_for_call().set_idle_cursor_status()
+
 
     @staticmethod
     def _polygon_display_name(region: PolygonRegion, index: int) -> str:
@@ -16287,6 +14391,7 @@ class PictureCaptureApp(tk.Tk):
                     self.canvas.coords(record["label_window"], label_x, label_y)
         except tk.TclError:
             pass
+        refresh_alpha_polygon_fill(self, region_index)
 
     def _persist_current_page_sections(self) -> None:
         """Save explicit SECTION bounds without touching PDIC/PPP."""
@@ -16879,33 +14984,24 @@ class PictureCaptureApp(tk.Tk):
         cache = self._paddle_cache_path()
         return cache.with_name(f"{cache.stem}_manual_selection.json") if cache else None
 
+    def _review_controller_for_call(self) -> ReviewController:
+        controller = self.__dict__.get("review_controller")
+        if controller is None:
+            controller = ReviewController(self)
+            self.__dict__["review_controller"] = controller
+        return controller
+
     def _load_ocr_review_candidates(self) -> None:
-        self.ocr_review_candidates = []
-        path = self._paddle_cache_path()
-        if not path or not path.exists():
-            return
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            self.ocr_review_candidates = list(payload.get("review_candidates") or [])
-        except Exception:
-            self.ocr_review_candidates = []
+        self._review_controller_for_call().load_ocr_review_candidates()
+
 
     def get_review_candidate(self, candidate_id: str) -> dict | None:
-        for item in self.ocr_review_candidates:
-            if str(item.get("candidate_id", "")) == candidate_id:
-                return item
-        return None
+        return self._review_controller_for_call().get_review_candidate(candidate_id)
+
 
     def _candidate_is_selected(self, cand: dict) -> bool:
-        cid = str(cand.get("candidate_id", ""))
-        y = int(cand.get("source_y", -99999))
-        x = int(cand.get("source_x", -99999))
-        for entry in self.entries:
-            if cid and entry.candidate_id == cid:
-                return True
-            if abs(entry.x - x) <= 12 and abs(entry.y - y) <= max(5, round(self._quick_geometry_value("character_height") * 0.45)):
-                return True
-        return False
+        return self._review_controller_for_call().candidate_is_selected(cand)
+
 
     def _read_manual_overrides(self) -> dict:
         path = self._manual_selection_path()
@@ -17019,13 +15115,8 @@ class PictureCaptureApp(tk.Tk):
         self._flush_pending_manual_override()
 
     def _entry_for_candidate(self, cand: dict) -> WordEntry | None:
-        cid = str(cand.get("candidate_id", "")); y = int(cand.get("source_y", -99999)); x = int(cand.get("source_x", -99999))
-        for entry in self.entries:
-            if cid and entry.candidate_id == cid:
-                return entry
-            if abs(entry.x - x) <= 12 and abs(entry.y - y) <= max(5, round(self._quick_geometry_value("character_height") * 0.45)):
-                return entry
-        return None
+        return self._review_controller_for_call().entry_for_candidate(cand)
+
 
     def set_candidate_selected(self, cand: dict, selected: bool) -> bool:
         if not self._claim_page_for_manual_edit():
@@ -17141,19 +15232,12 @@ class PictureCaptureApp(tk.Tk):
                 var.set(self._candidate_is_selected(cand))
 
     def clear_review_entry_highlight(self) -> None:
-        self._review_entry_highlight_target = None
-        self._review_entry_highlight_photo = None
-        try:
-            self.canvas.delete("proofread-entry-highlight")
-        except tk.TclError:
-            pass
+        self._review_controller_for_call().clear_review_entry_highlight()
+
 
     def highlight_review_entry(self, entry: WordEntry) -> None:
-        """Mirror the focused proofreading row on the main page in pale yellow."""
-        if self.image is None or self.current_index < 0:
-            return
-        self._review_entry_highlight_target = (self.current_index, int(entry.x), int(entry.y))
-        self._draw_review_entry_highlight()
+        self._review_controller_for_call().highlight_review_entry(entry)
+
 
     def _draw_review_entry_highlight(self, geometry=None) -> None:
         self._review_entry_highlight_photo = None
@@ -17211,29 +15295,8 @@ class PictureCaptureApp(tk.Tk):
             pass
 
     def jump_to_review_candidate(self, cand: dict) -> None:
-        if not self.image: return
-        y = int(cand.get("source_y", 0))
-        # Scroll so the candidate appears around the upper third of the viewport.
-        canvas_h = max(1, self.canvas.winfo_height())
-        target = max(0.0, y * self.view_scale - canvas_h * 0.30)
-        total = max(1.0, self.image.height * self.view_scale)
-        self.canvas.yview_moveto(min(1.0, target / total))
-        self.canvas.delete("review-highlight")
-        geometry = self._get_cached_display_geometry()
-        col = max(0, min(len(geometry.column_starts) - 1, int(cand.get("column", 0))))
-        x_source = int(cand.get("source_x", 0))
-        _u, v = geometry.source_to_canonical(x_source, y)
-        canonical_box = (
-            geometry.x_at(col, v), v - 5,
-            geometry.x_at(col, v) + round(geometry.column_widths[col] * 0.98), v + 18,
-        )
-        x0, y0, x1, y1 = geometry.transform.canonical_box_to_source(canonical_box, self.image.size)
-        self.canvas.create_rectangle(
-            x0 * self.view_scale, y0 * self.view_scale,
-            x1 * self.view_scale, y1 * self.view_scale,
-            outline="#00bcd4", width=3, tags=("review-highlight",),
-        )
-        self.canvas.tag_raise("review-highlight")
+        self._review_controller_for_call().jump_to_review_candidate(cand)
+
 
     def open_ocr_conflict_review(self) -> None:
         if not self.guard(): return
@@ -17508,123 +15571,21 @@ class PictureCaptureApp(tk.Tk):
     def auto_detect_current(
         self, clicked_x: int | None = None, force_paddle_refresh: bool = False,
     ) -> None:
-        """Backward-compatible single-page detection routed through the batch worker."""
-        if self._batch_active:
-            self.status_var.set("后台画线任务运行中，暂不启动前台自动识别；可进行人工校对。")
-            return
-        if not self.guard():
-            return
-        if not self._guard_transformed_geometry("自动画线"):
-            return
-
-        project = self.project
-        page = self.current_page
-        page_index = int(self.current_index)
-        settings = replace(self.settings)
-        page_sections = list(self.page_sections)
-        existing_entries = [replace(entry) for entry in self.entries]
-        cache_path = (
-            ocr_cache_root(project.root) / f"{page.stem}.json"
-            if settings.detection_method in {"paddleocr", "combined"} else None
-        )
-        filter_path = (
-            headword_filter_rules_path(project.root, HEADWORD_FILTER_RULES_FILENAME)
-            if settings.detection_method in {"paddleocr", "combined"} else None
+        self._detection_controller_for_call().auto_detect_current(
+            clicked_x=clicked_x,
+            force_paddle_refresh=force_paddle_refresh,
         )
 
-        def worker(_item, _position: int, _total: int):
-            with Image.open(page) as opened:
-                image = normalize_page_rgb(opened)
-            detected, geometry = detect_entries(
-                image,
-                settings,
-                paddle_cache_path=cache_path,
-                force_paddle_refresh=force_paddle_refresh,
-                paddle_filter_rules_path=filter_path,
-                profile_page_index=page_index,
-                page_sections=page_sections,
-            )
-            text_stats = None
-            if settings.detection_method == "combined":
-                original_coords = [
-                    (int(entry.x), int(entry.y)) for entry in detected
-                ]
-                detected, text_stats = ocr_existing_entry_words_from_markers(
-                    image,
-                    detected,
-                    settings,
-                    load_replace_rules(replace_rules_path(project.root)),
-                    profile_page_index=page_index,
-                    page_sections=page_sections,
-                    profile_path=project_profile_path(project.root),
-                    only_blank=True,
-                )
-                if [
-                    (int(entry.x), int(entry.y)) for entry in detected
-                ] != original_coords:
-                    raise RuntimeError(
-                        "融合画线自动补字不得修改任何画线坐标"
-                    )
-            return detected, geometry, text_stats
-
-        def done(_completed, _total, stopped, results, error):
-            if error is not None or stopped or not results:
-                return
-            if self.project is not project or self.current_page != page:
-                return
-            detected, geometry, text_stats = results[-1]
-            if clicked_x is None:
-                self.entries = list(detected)
-            else:
-                col = column_index_for_click(clicked_x, geometry)
-                merged = [
-                    entry for entry in existing_entries
-                    if column_index(entry.x, geometry, entry.y) != col
-                ]
-                merged.extend(
-                    entry for entry in detected
-                    if column_index(entry.x, geometry, entry.y) == col
-                )
-                self.entries = merged
-            self._sort_entries_reading_order()
-            if settings.detection_method in {"paddleocr", "combined"}:
-                self._load_ocr_review_candidates()
-                self._refresh_page_quality_colors()
-            self.redraw()
-            if settings.detection_method in {"paddleocr", "combined"}:
-                cache = ocr_cache_root(project.root) / f"{page.stem}.json"
-                quality = self._current_page_quality_text()
-                fill_text = ""
-                if settings.detection_method == "combined" and text_stats:
-                    fill_text = (
-                        f"；普通救漏自动补字 {int(text_stats.get('filled', 0))} 条"
-                        f"（普通框 {int(text_stats.get('regular', 0))}，"
-                        f"大字框 {int(text_stats.get('large', 0))}）"
-                    )
-                self.status_var.set(
-                    f"智能画线完成：{len(self.entries)} 个词条；{quality}"
-                    f"{fill_text}；紧凑OCR缓存 {cache.name}"
-                )
-            else:
-                self.status_var.set(
-                    f"智能画线完成：检测到 {len(self.entries)} 个词条；可手动增删后保存"
-                )
-
-        label = {
-            "combined": "融合画线 当前页识别",
-            "paddleocr": "PaddleOCR 当前页识别",
-        }.get(settings.detection_method, "当前页自动画线")
-        self._start_batch_task(
-            label, [page_index], worker, done,
-            item_label=lambda _item: page.name,
-            refresh_page_quality=settings.detection_method in {"paddleocr", "combined"},
-        )
+    def _detection_controller_for_call(self) -> DetectionController:
+        controller = self.__dict__.get("detection_controller")
+        if controller is None:
+            controller = DetectionController(self)
+            self.__dict__["detection_controller"] = controller
+        return controller
 
     def paddle_detect_current(self, force_refresh: bool = False) -> None:
-        self.settings.detection_method = "paddleocr"
-        self.sync_quick_settings()
-        self.save_settings()
-        self.auto_detect_current(force_paddle_refresh=force_refresh)
+        self._detection_controller_for_call().paddle_detect_current(force_refresh)
+
 
     def refine_lines_selected_scope(self) -> None:
         """Re-run only Y refinement for existing PDIC markers in the selected range.
@@ -17724,6 +15685,8 @@ class PictureCaptureApp(tk.Tk):
 
     def ocr_ordinary_lines_text_selected_scope(self) -> None:
         """OCR text for existing ordinary markers without changing geometry."""
+        if not guard_ocr_action_selection(self):
+            return
         if not self.guard() or not self.apply_quick_settings(show_status=False):
             return
         if self._batch_active:
@@ -17749,7 +15712,7 @@ class PictureCaptureApp(tk.Tk):
 
         if len(existing) > 1 and not messagebox.askyesno(
             "普通画线后OCR文字",
-            f"将对 {len(existing)} 个已有画线的页面逐条做局部 PaddleOCR。\n\n"
+            f"将对 {len(existing)} 个已有画线的页面逐条调用共享 OCR 通道。\n\n"
             "只填充空白词条；已有文字和人工校对内容保持不变；"
             "不会新增、删除或移动任何画线。继续？",
             parent=self,
@@ -17848,38 +15811,19 @@ class PictureCaptureApp(tk.Tk):
         )
 
     def run_combined_draw_action(self) -> None:
-        if not self.guard() or not self.apply_quick_settings(show_status=False): return
-        try: indices = self.selected_page_indices()
-        except Exception as exc:
-            self.show_error("页面范围无效", exc); return
-        self.settings.detection_method = "combined"; self.save_settings()
-        self._detect_pages(
-            indices,
-            method="combined",
-            force_refresh=self.ocr_refresh_var.get() == "force",
-        )
+        self._detection_controller_for_call().run_combined_draw_action()
+
 
     def run_ocr_draw_action(self) -> None:
-        if not self.guard() or not self.apply_quick_settings(show_status=False): return
-        try: indices = self.selected_page_indices()
-        except Exception as exc:
-            self.show_error("页面范围无效", exc); return
-        self.settings.detection_method = "paddleocr"; self.save_settings()
-        self._detect_pages(indices, method="paddleocr", force_refresh=self.ocr_refresh_var.get() == "force")
+        self._detection_controller_for_call().run_ocr_draw_action()
+
 
     def run_normal_draw_action(self) -> None:
-        if not self.guard() or not self.apply_quick_settings(show_status=False): return
-        try: indices = self.selected_page_indices()
-        except Exception as exc:
-            self.show_error("页面范围无效", exc); return
-        self.settings.detection_method = "left_edge"; self.save_settings()
-        self._detect_pages(indices, method="left_edge", force_refresh=False)
+        self._detection_controller_for_call().run_normal_draw_action()
 
     def run_ocr_draw(self, scope: str, force_refresh: bool) -> None:
-        if not self.guard() or not self.apply_quick_settings(show_status=False): return
-        self.settings.detection_method = "paddleocr"
-        indices = [self.current_index] if scope == "current" else list(range(len(self.project.images)))
-        self._detect_pages(indices, method="paddleocr", force_refresh=force_refresh)
+        self._detection_controller_for_call().run_ocr_draw(scope, force_refresh)
+
 
     def _detect_pages(self, indices: list[int], *, method: str, force_refresh: bool) -> None:
         if not self.project or not indices:
@@ -18272,100 +16216,37 @@ class PictureCaptureApp(tk.Tk):
             item_label=lambda _item: page.name,
         )
 
+    def _export_controller_for_call(self) -> ExportController:
+        controller = self.__dict__.get("export_controller")
+        if controller is None:
+            controller = ExportController(self)
+            self.__dict__["export_controller"] = controller
+        return controller
+
     def export_text(self) -> None:
-        if not self.guard(): return
-        export_ocred(qt_root(self.project.root) / f"{self.current_page.stem}.OCRed",
-                     [e.word for e in self._ordered_entries_reading_order()])
-        self.status_var.set("当前文本已导出")
+        self._export_controller_for_call().export_text()
 
     def import_text(self) -> None:
-        if not self.guard(): return
-        path = qt_root(self.project.root) / f"{self.current_page.stem}.OCRed"
-        try:
-            texts = import_ocred(path)
-            if len(texts) != len(self.entries): raise ValueError(f"文本 {len(texts)} 行，画线 {len(self.entries)} 条，数量不一致")
-            for entry, text in zip(self._ordered_entries_reading_order(), texts): entry.word = text
-            self.redraw(); self.status_var.set("当前文本已导入")
-        except Exception as exc: self.show_error("导入失败", exc)
+        self._export_controller_for_call().import_text()
+
+    def _crop_controller_for_call(self) -> CropController:
+        controller = self.__dict__.get("crop_controller")
+        if controller is None:
+            controller = CropController(self)
+            self.__dict__["crop_controller"] = controller
+        return controller
 
     def split_lines_current(self) -> None:
-        """Backward-compatible single-line crop export routed off the Tk thread."""
-        if self._batch_active:
-            self.status_var.set("已有批量任务正在运行，请结束后再执行单行切图。")
-            return
-        if not self.guard():
-            return
-        if not self._guard_transformed_geometry("单行切图"):
-            return
-        project = self.project
-        page = self.current_page
-        page_index = int(self.current_index)
-        entries = [replace(entry) for entry in self.entries]
-        settings = replace(self.settings)
-        out_dir = qt_root(project.root) / "PSW"
+        self._crop_controller_for_call().split_lines_current()
 
-        def worker(_item, _position: int, _total: int):
-            records = split_single_lines(
-                page, entries, settings, out_dir,
-                profile_page_index=page_index,
-            )
-            append_crop_log(project.root, records)
-            return len(records)
+    def split_single_lines_selected_scope(self) -> None:
+        self._crop_controller_for_call().split_single_lines_selected_scope()
 
-        def done(_completed, _total, stopped, results, error):
-            if error is None and not stopped and results:
-                self.status_var.set(f"已导出 {int(results[-1] or 0)} 张词条单行图")
-
-        self._start_batch_task(
-            "当前页单行切图", [page_index], worker, done,
-            item_label=lambda _item: page.name,
-        )
+    def export_unlined_rows_selected_scope(self) -> None:
+        self._crop_controller_for_call().export_unlined_rows_selected_scope()
 
     def split_whole_current(self) -> None:
-        """Backward-compatible whole-entry crop export routed off the Tk thread."""
-        if self._batch_active:
-            self.status_var.set("已有批量任务正在运行，请结束后再执行整体切图。")
-            return
-        if not self.guard():
-            return
-        if not self._guard_transformed_geometry("整体切图"):
-            return
-
-        project = self.project
-        page = self.current_page
-        page_index = int(self.current_index)
-        entries = [replace(entry) for entry in self.entries]
-        polygons = list(self.polygons)
-        settings = replace(self.settings)
-        config = self._load_crop_settings()
-        special = config.get("special_pages", {}).get(page.stem, {})
-        top_y = int(special.get("top_y", config.get("general_top_y", settings.start_y)))
-        bottom_y = int(special.get("bottom_y", config.get("general_bottom_y", 0)))
-        entry_left = int(config.get("entry_left_padding_x", 0))
-        entry_right = int(config.get("entry_right_padding_x", 0))
-        integrate_illustrations = bool(config.get("integrate_illustrations", True))
-        out_dir = qt_root(project.root) / "PWW"
-
-        def worker(_item, _position: int, _total: int):
-            records = split_whole_entries(
-                page, entries, settings, out_dir,
-                top_y=top_y, bottom_y=bottom_y, polygons=polygons,
-                entry_left_padding=entry_left,
-                entry_right_padding=entry_right,
-                integrate_illustrations=integrate_illustrations,
-                profile_page_index=page_index,
-            )
-            append_crop_log(project.root, records)
-            return len(records)
-
-        def done(_completed, _total, stopped, results, error):
-            if error is None and not stopped and results:
-                self.status_var.set(f"已导出 {int(results[-1] or 0)} 张词条整体图")
-
-        self._start_batch_task(
-            "当前页整体切图", [page_index], worker, done,
-            item_label=lambda _item: page.name,
-        )
+        self._crop_controller_for_call().split_whole_current()
 
     def _crop_settings_defaults(self) -> dict:
         default_bottom = self.settings.bottom_y if self.settings.crop_to_bottom_y else 0
@@ -18402,209 +16283,27 @@ class PictureCaptureApp(tk.Tk):
         self.open_settings(initial_tab="crop")
 
     def split_entries_selected_scope(self) -> None:
-        if not self.guard(): return
-        try: indices = self.selected_page_indices()
-        except Exception as exc:
-            self.show_error("页面范围无效", exc); return
-        self.save_pdic(silent=True)
-        project = self.project
-        settings = replace(self.settings)
-        config = self._load_crop_settings()
-        out_dir = qt_root(project.root) / "PWW"
-        general_top = int(config.get("general_top_y", settings.start_y))
-        general_bottom = int(config.get("general_bottom_y", 0))
-        entry_left = int(config.get("entry_left_padding_x", 0))
-        entry_right = int(config.get("entry_right_padding_x", 0))
-        integrate_illustrations = bool(config.get("integrate_illustrations", True))
-        specials = config.get("special_pages", {}) if isinstance(config.get("special_pages", {}), dict) else {}
-        workers = int(config.get("parallel_workers", settings.crop_parallel_workers))
+        self._crop_controller_for_call().split_entries_selected_scope()
 
-        def job_builder(index: int, _position: int, _total: int):
-            page = project.images[index]
-            special = specials.get(page.stem, {}) if isinstance(specials.get(page.stem, {}), dict) else {}
-            top_y = int(special.get("top_y", general_top)); bottom_y = int(special.get("bottom_y", general_bottom))
-            return (
-                str(page), str(pdic_path(page)), settings, str(out_dir), top_y, bottom_y,
-                str(self._ppp_read_path(page)), entry_left, entry_right, integrate_illustrations,
-                index,
-            )
-
-        def consume_result(_index: int, records):
-            append_crop_log(project.root, records); return len(records)
-
-        def done(completed, total_pages, stopped, results, error):
-            if error is not None: return
-            count = sum(int(v or 0) for v in results)
-            if stopped: self.status_var.set(f"词条切图已停止：完成 {completed}/{total_pages} 页，共导出 {count} 张")
-            else: self.status_var.set(f"词条切图完成：{completed} 页，共 {count} 张")
-
-        self._start_parallel_batch_task(
-            "词条切图", indices, split_whole_entries_job, job_builder, consume_result, done,
-            item_label=lambda i: project.images[i].name, max_workers=workers,
-        )
+    def _illustration_controller_for_call(self) -> IllustrationController:
+        controller = self.__dict__.get("illustration_controller")
+        if controller is None:
+            controller = IllustrationController(self)
+            self.__dict__["illustration_controller"] = controller
+        return controller
 
     def detect_illustrations_selected_scope(self) -> None:
-        """Automatically detect illustrations on the selected page range and save PPP polygons."""
-        if self._batch_active:
-            self.status_var.set("已有批量任务正在运行，请结束后再执行插图识别。")
-            return
-        if not self.project or not self.current_page or self.image is None:
-            messagebox.showinfo("尚未打开", "请先打开包含扫描图片的项目目录。", parent=self)
-            return
-        try:
-            indices = self.selected_page_indices()
-        except Exception as exc:
-            self.show_error("页面范围无效", exc)
-            return
-        if not indices:
-            return
-        # Persist the current foreground polygon edits before the worker sees it.
-        write_ppp(self._ppp_write_path(self.current_page), self.polygons, self.current_page.stem)
-        first = self.project.images[indices[0]].name
-        last = self.project.images[indices[-1]].name
-        if not messagebox.askyesno(
-            "插图识别",
-            f"将在所选范围自动识别插图并写入 PPP：\n{first} → {last}（共 {len(indices)} 页）\n\n"
-            "人工绘制的 PPP 多边形会保留；再次识别只替换此前自动生成的 AUTO 区域。\n"
-            "识别结果可继续用“绘制插图多边形”手工修正。\n\n开始识别？",
-            parent=self,
-        ):
-            return
-        project = self.project
-        settings = replace(self.settings)
-
-        def worker(index: int, _position: int, _total: int):
-            page = project.images[index]
-            return detect_illustrations_job(str(page), settings, index)
-
-        def done(completed, total_pages, stopped, results, error):
-            if error is not None:
-                return
-            auto_count = sum(int((r or {}).get("auto", 0)) for r in results)
-            if stopped:
-                self.status_var.set(
-                    f"插图识别已停止：完成 {completed}/{total_pages} 页，自动识别 {auto_count} 个插图区域"
-                )
-            else:
-                self.status_var.set(
-                    f"插图识别完成：{completed} 页，自动识别 {auto_count} 个插图区域；人工 PPP 已保留"
-                )
-            if self.current_index in indices and self.current_page is not None:
-                self.polygons = read_ppp(self._ppp_read_path(self.current_page))
-                self._update_page_row(self.current_index)
-                self.polygon_var.set(True)
-                self.redraw()
-
-        self._start_batch_task(
-            "插图识别", indices, worker, done,
-            item_label=lambda i: project.images[i].name,
-            foreground_page_edit=True, page_indexer=lambda i: int(i),
-        )
+        self._illustration_controller_for_call().detect_illustrations_selected_scope()
 
     def split_illustrations_selected_scope(self) -> None:
-        """Export PPP illustrations immediately using the shared 切图设置 snapshot."""
-        if self._batch_active:
-            self.status_var.set("已有批量任务正在运行，请结束后再执行插图切图。")
-            return
-        if not self.project or not self.current_page or self.image is None:
-            messagebox.showinfo("尚未打开", "请先打开包含扫描图片的项目目录。", parent=self)
-            return
-        try: indices = self.selected_page_indices()
-        except Exception as exc:
-            self.show_error("页面范围无效", exc); return
-        if not indices: return
-        self._sync_polygon_label_texts()
-        write_ppp(self._ppp_write_path(self.current_page), self.polygons, self.current_page.stem)
-        self._start_illustration_crop(indices, self._load_crop_settings())
+        self._illustration_controller_for_call().split_illustrations_selected_scope()
 
     def _start_illustration_crop(self, indices: list[int], config: dict) -> None:
         """Start PPP illustration export from the shared crop-settings snapshot."""
-        if not self.project or self._batch_active:
-            if self._batch_active:
-                self.status_var.set("已有批量任务正在运行，未启动插图切图。")
-            return
-        project = self.project
-        settings = replace(self.settings)
-        out_dir = qt_root(project.root) / "PIC"
-        general_top = int(config.get("general_top_y", settings.start_y))
-        general_bottom = int(config.get("general_bottom_y", 0))
-        margin = int(config.get("polygon_margin", 0))
-        entry_left = int(config.get("entry_left_padding_x", 0))
-        entry_right = int(config.get("entry_right_padding_x", 0))
-        integrate_illustrations = bool(config.get("integrate_illustrations", True))
-        specials = config.get("special_pages", {}) if isinstance(config.get("special_pages", {}), dict) else {}
-        workers = int(config.get("parallel_workers", settings.crop_parallel_workers))
-
-        def job_builder(index: int, _position: int, _total: int):
-            page = project.images[index]
-            special = specials.get(page.stem, {}) if isinstance(specials.get(page.stem, {}), dict) else {}
-            top_y = int(special.get("top_y", general_top))
-            bottom_y = int(special.get("bottom_y", general_bottom))
-            return (
-                str(page), str(self._ppp_read_path(page)), str(out_dir), settings,
-                top_y, bottom_y, margin, str(pdic_path(page)), entry_left, entry_right, integrate_illustrations,
-                index,
-            )
-
-        def consume_result(_index: int, result):
-            records = list(getattr(result, "records", []) or [])
-            events = list(getattr(result, "events", []) or [])
-            append_crop_log(project.root, records)
-            append_illustration_crop_log(project.root, events)
-            return len(records)
-
-        def done(completed, total_pages, stopped, results, error):
-            if error is not None:
-                return
-            count = sum(int(v or 0) for v in results)
-            if stopped:
-                self.status_var.set(f"插图切图已停止：完成 {completed}/{total_pages} 页，共导出 {count} 张")
-            else:
-                self.status_var.set(f"插图切图完成：{completed} 页，共 {count} 张")
-
-        self._start_parallel_batch_task(
-            "插图切图", indices, split_illustrations_job, job_builder, consume_result, done,
-            item_label=lambda i: project.images[i].name,
-            max_workers=workers,
-        )
+        self._illustration_controller_for_call()._start_illustration_crop(indices, config)
 
     def build_picdic(self) -> None:
-        if not self.guard():
-            return
-        if self._batch_active:
-            self.status_var.set("已有批量任务正在运行，请结束后再制作 PicDic。")
-            return
-        try:
-            self.save_pdic(silent=True)
-        except Exception as exc:
-            self.show_error("PicDic 制作准备失败", exc)
-            return
-        root = self.project.root
-        language = self.settings.ocr_language
-
-        def worker(_item, _position: int, _total: int):
-            try:
-                return build_picdic_package(
-                    root, language, should_stop=self._batch_stop_event.is_set,
-                )
-            except PicDicBuildCancelled:
-                return None
-
-        def done(_completed, _total, stopped, results, error):
-            if error is not None or stopped or not results:
-                return
-            dsl, archive, words, images = results[-1]
-            self.status_var.set(f"PicDic 制作完成：{words} 个词头，{images} 张图片")
-            messagebox.showinfo(
-                "PicDic 制作完成",
-                f"词头：{words}\n图片：{images}\n\nDSL：{dsl.name}\n图片包：{archive.name}\n目录：{dsl.parent}",
-                parent=self,
-            )
-
-        self._start_batch_task(
-            "PicDic 制作", [root], worker, done,
-            item_label=lambda _item: "生成 DSL 与图片包", refresh_page_quality=False,
-        )
+        self._export_controller_for_call().build_picdic()
 
     def _order_key(self, word: str) -> tuple:
         return collation_key(
@@ -18625,185 +16324,7 @@ class PictureCaptureApp(tk.Tk):
         )
 
     def check_headword_order(self, all_pages: bool = False) -> None:
-        if not self.guard():
-            return
-        self.save_pdic(silent=True)
-        title = "所有词头顺序核对" if all_pages else "当前页词头顺序核对"
-
-        if all_pages:
-            project = self.project
-            pages = list(project.images)
-            indices = list(range(len(pages)))
-            sort_mode = getattr(self.settings, "headword_sort_mode", "auto")
-            language = getattr(self.settings, "ocr_language", "eng")
-            custom_order = getattr(self.settings, "headword_custom_order", LATIN_ORDER)
-            fold_accents = getattr(self.settings, "headword_custom_fold_accents", True)
-            rule = profile_label(sort_mode, language)
-
-            def worker(index: int, _position: int, _total: int):
-                page = pages[index]
-                rows: list[tuple[str, str, tuple, str]] = []
-                for entry in read_pdic(pdic_path(page)):
-                    word = entry.word.strip()
-                    if not word:
-                        continue
-                    rows.append((
-                        page.name,
-                        word,
-                        collation_key(
-                            word, sort_mode, language, custom_order, fold_accents,
-                        ),
-                        display_key(
-                            word, sort_mode, language, custom_order, fold_accents,
-                        ),
-                    ))
-                return rows
-
-            def done(completed, total_pages, stopped, results, error):
-                if error is not None:
-                    return
-                page_results = list(results)
-                self.status_var.set(
-                    f"词头读取完成 {completed}/{total_pages} 页；正在后台汇总排序…"
-                )
-
-                def finalize():
-                    sequence = [
-                        row
-                        for page_rows in page_results
-                        if isinstance(page_rows, list)
-                        for row in page_rows
-                    ]
-                    if len(sequence) < 2:
-                        return {
-                            "count": len(sequence), "inversions": 0,
-                            "mismatches": 0, "rule": rule, "report": "",
-                            "stopped": bool(stopped), "completed": completed,
-                            "total": total_pages,
-                        }
-                    inversions: list[
-                        tuple[
-                            tuple[str, str, tuple, str],
-                            tuple[str, str, tuple, str],
-                        ]
-                    ] = []
-                    for i in range(1, len(sequence)):
-                        if sequence[i][2] < sequence[i - 1][2]:
-                            inversions.append((sequence[i - 1], sequence[i]))
-                    expected = sorted(sequence, key=lambda item: item[2])
-                    mismatches = sum(
-                        1 for actual, wanted in zip(sequence, expected)
-                        if actual[:3] != wanted[:3]
-                    )
-                    lines = [
-                        f"共核对 {len(sequence)} 个非空词头；发现 {len(inversions)} 处相邻逆序，"
-                        f"排序后有 {mismatches} 个位置变化。",
-                        f"排序规则：{rule}",
-                    ]
-                    if stopped:
-                        lines.extend([
-                            f"注意：任务提前停止，仅统计已完成的 {completed}/{total_pages} 页。",
-                            "",
-                        ])
-                    else:
-                        lines.append("")
-                    lines.append("以下为相邻逆序（前一词 > 后一词）：")
-                    for number, (prev, cur) in enumerate(inversions[:200], 1):
-                        lines.append(
-                            f"{number}. {prev[0]}  {prev[1]} [{prev[3]}]  >  "
-                            f"{cur[0]}  {cur[1]} [{cur[3]}]"
-                        )
-                    if len(inversions) > 200:
-                        lines.append(f"…另有 {len(inversions) - 200} 处未显示")
-                    return {
-                        "count": len(sequence), "inversions": len(inversions),
-                        "mismatches": mismatches, "rule": rule,
-                        "report": "\n".join(lines), "stopped": bool(stopped),
-                        "completed": completed, "total": total_pages,
-                    }
-
-                def finalized(result) -> None:
-                    if self.project is not project:
-                        return
-                    count = int(result["count"])
-                    inversions = int(result["inversions"])
-                    stopped_suffix = (
-                        f"（提前停止，仅完成 {result['completed']}/{result['total']} 页）"
-                        if result["stopped"] else ""
-                    )
-                    if count < 2:
-                        messagebox.showinfo(
-                            title,
-                            f"可核对的非空词头不足 2 个。{stopped_suffix}",
-                            parent=self,
-                        )
-                    elif not inversions:
-                        messagebox.showinfo(
-                            title,
-                            f"顺序正常。\n共核对 {count} 个非空词头。\n"
-                            f"排序规则：{result['rule']}\n{stopped_suffix}",
-                            parent=self,
-                        )
-                    else:
-                        self._show_text_report(title, str(result["report"]))
-                    self.status_var.set(
-                        f"{title}完成：核对 {count} 个非空词头{stopped_suffix}"
-                    )
-
-                def finalize_failed(exc, detail) -> None:
-                    if detail:
-                        print(detail)
-                    if self.project is project:
-                        self.show_error(f"{title}汇总失败", exc)
-
-                self._start_ui_worker(
-                    "headword-order-finalize", finalize, finalized, finalize_failed,
-                )
-
-            self._start_batch_task(
-                "所有词头顺序核对", indices, worker, done,
-                item_label=lambda i: pages[i].name,
-                refresh_page_quality=False,
-            )
-            return
-
-        sequence: list[tuple[str, str, tuple]] = []
-        for entry in self.entries:
-            word = entry.word.strip()
-            if word:
-                sequence.append((self.current_page.name, word, self._order_key(word)))
-        if len(sequence) < 2:
-            messagebox.showinfo(title, "可核对的非空词头不足 2 个。", parent=self)
-            return
-        inversions: list[tuple[int, tuple[str, str, tuple], tuple[str, str, tuple]]] = []
-        for i in range(1, len(sequence)):
-            if sequence[i][2] < sequence[i - 1][2]:
-                inversions.append((i, sequence[i - 1], sequence[i]))
-        expected = sorted(sequence, key=lambda item: item[2])
-        mismatches = sum(1 for actual, wanted in zip(sequence, expected) if actual != wanted)
-        if not inversions:
-            rule = profile_label(self.settings.headword_sort_mode, self.settings.ocr_language)
-            messagebox.showinfo(
-                title,
-                f"顺序正常。\n共核对 {len(sequence)} 个非空词头。\n排序规则：{rule}",
-                parent=self,
-            )
-            return
-        rule = profile_label(self.settings.headword_sort_mode, self.settings.ocr_language)
-        lines = [
-            f"共核对 {len(sequence)} 个非空词头；发现 {len(inversions)} 处相邻逆序，排序后有 {mismatches} 个位置变化。",
-            f"排序规则：{rule}",
-            "",
-            "以下为相邻逆序（前一词 > 后一词）：",
-        ]
-        for number, (_i, prev, cur) in enumerate(inversions[:200], 1):
-            lines.append(
-                f"{number}. {prev[0]}  {prev[1]} [{self._order_display_key(prev[1])}]  >  "
-                f"{cur[0]}  {cur[1]} [{self._order_display_key(cur[1])}]"
-            )
-        if len(inversions) > 200:
-            lines.append(f"…另有 {len(inversions)-200} 处未显示")
-        self._show_text_report(title, "\n".join(lines))
+        self._review_controller_for_call().check_headword_order(all_pages)
 
     def _show_text_report(self, title: str, text: str) -> None:
         win = tk.Toplevel(self); win.title(title); fit_window_to_work_area(win, 900, 650, min_width=640, min_height=460)
@@ -18817,767 +16338,46 @@ class PictureCaptureApp(tk.Tk):
         box.insert("1.0", text); box.configure(state="disabled")
 
     def batch_auto_detect(self, force_paddle_refresh: bool = False) -> None:
-        if not self.project: return
-        self._detect_pages(
-            list(range(len(self.project.images))),
-            method=self.settings.detection_method,
-            force_refresh=force_paddle_refresh,
-        )
+        self._detection_controller_for_call().batch_auto_detect(force_paddle_refresh)
 
     def batch_ocr(self) -> None:
-        if not self.project or self._batch_active: return
-        if not self._guard_transformed_geometry("批量 OCR"):
-            return
-        indices = [i for i, page in enumerate(self.project.images) if read_pdic(pdic_path(page))]
-        if not indices:
-            self.status_var.set("没有含 PDIC 词条的页面可执行批量 OCR")
-            return
-        if not messagebox.askyesno(
-            "批量 OCR",
-            f"将对 {len(indices)} 个已有 PDIC 的页面执行 OCR。\n\n"
-            "处理期间可暂停或停止；当前页会先完整处理并保存。继续？",
-            parent=self,
-        ):
-            return
-        project = self.project
-        settings = replace(self.settings)
-        rules = load_replace_rules(replace_rules_path(project.root))
-        pages_info = {i: self.pages_tuple(i) for i in indices}
-
-        def worker(index: int, _position: int, _total: int):
-            page = project.images[index]
-            entries = read_pdic(pdic_path(page))
-            with Image.open(page) as opened:
-                image = normalize_page_rgb(opened)
-            effective_settings = effective_page_settings(settings, image.size, index)
-            analysis_image = page_template_analysis_image(image, effective_settings, index)
-            sections = read_page_sections(page)
-            entries = sort_entries_reading_order(
-                entries, derive_geometry(analysis_image, effective_settings), sections,
-            )
-            texts = ocr_entries(
-                image, entries, settings, rules, profile_page_index=index,
-                page_sections=sections,
-            )
-            for entry, text in zip(entries, texts): entry.word = text
-            export_ocred(qt_root(project.root) / f"{page.stem}.OCRed", texts)
-            write_pdic(pdic_path(page), entries, image.width, pages_info[index])
-            return len(texts)
-
-        def done(completed, total_pages, stopped, results, error):
-            if error is not None: return
-            count = sum(int(v or 0) for v in results)
-            self.load_page(self.current_index)
-            if stopped:
-                self.status_var.set(f"批量 OCR 已停止：完成 {completed}/{total_pages} 页，共 {count} 个词条")
-            else:
-                self.status_var.set(f"批量 OCR 完成：{count} 个词条")
-
-        self._start_batch_task("批量 OCR", indices, worker, done, item_label=lambda i: project.images[i].name)
+        self._detection_controller_for_call().batch_ocr()
 
     def batch_split_whole(self) -> None:
-        if not self.project or self._batch_active: return
-        if not self._guard_transformed_geometry("批量整体切图"):
-            return
-        project = self.project
-        settings = replace(self.settings)
-        indices = list(range(len(project.images)))
-        out_dir = qt_root(project.root) / "PWW"
-        config = self._load_crop_settings()
-        general_top = int(config.get("general_top_y", settings.start_y))
-        general_bottom = int(config.get("general_bottom_y", 0))
-        entry_left = int(config.get("entry_left_padding_x", 0))
-        entry_right = int(config.get("entry_right_padding_x", 0))
-        integrate_illustrations = bool(config.get("integrate_illustrations", True))
-        specials = config.get("special_pages", {}) if isinstance(config.get("special_pages", {}), dict) else {}
-
-        def worker(index: int, _position: int, _total: int):
-            page = project.images[index]
-            entries = read_pdic(pdic_path(page))
-            polygons = read_ppp(ppp_read_path_for_image(page))
-            special = specials.get(page.stem, {}) if isinstance(specials.get(page.stem, {}), dict) else {}
-            top_y = int(special.get("top_y", general_top))
-            bottom_y = int(special.get("bottom_y", general_bottom))
-            records = split_whole_entries(
-                page, entries, settings, out_dir, top_y=top_y, bottom_y=bottom_y, polygons=polygons,
-                entry_left_padding=entry_left, entry_right_padding=entry_right,
-                integrate_illustrations=integrate_illustrations,
-                profile_page_index=index,
-            )
-            append_crop_log(project.root, records)
-            return len(records)
-
-        def done(completed, total_pages, stopped, results, error):
-            if error is not None: return
-            count = sum(int(v or 0) for v in results)
-            if stopped:
-                self.status_var.set(f"批量整体切图已停止：完成 {completed}/{total_pages} 页，共 {count} 张")
-            else:
-                self.status_var.set(f"批量整体切图完成：{count} 张")
-
-        self._start_batch_task("批量整体切图", indices, worker, done, item_label=lambda i: project.images[i].name)
+        self._crop_controller_for_call().batch_split_whole()
 
     def repair_pdic_order_selected_scope(self) -> None:
-        """Rewrite selected-page PDIC files in stable column/Y order.
-
-        X deliberately does not participate in this repair sort.  Existing
-        word<->coordinate pairs remain intact; records sharing the same column
-        and Y retain their current relative order.
-        """
-        if not self.project or not self.current_page or self.image is None:
-            messagebox.showinfo("尚未打开", "请先打开包含扫描图片的项目目录。", parent=self)
-            return
-        if self._batch_active:
-            self.status_var.set("已有批量任务正在运行，请结束后再修复排序。")
-            return
-        try:
-            indices = self.selected_page_indices()
-        except Exception as exc:
-            self.show_error("页面范围错误", exc)
-            return
-        if not indices:
-            self.status_var.set("没有选中需要修复的页面")
-            return
-
-        existing = [i for i in indices if pdic_path(self.project.images[i]).exists()]
-        if not existing:
-            self.status_var.set("所选范围没有已有 PDIC 文件")
-            return
-        try:
-            self._flush_deferred_page_save()
-            self._sync_entry_editor_texts()
-            self.save_pdic(silent=True, sync_editors=False)
-        except Exception as exc:
-            self.show_error("修复排序准备失败", exc)
-            return
-
-        if not messagebox.askyesno(
-            "修复排序",
-            f"将对所选范围中 {len(existing)} 个已有 PDIC 页面按“栏号 → Y”重新排序并原子写回（X 不参与排序）。\n\n"
-            "每条记录现有的词条文字与 X/Y 坐标会保持绑定，不会重新 OCR 或改词。\n"
-            "建议先点击【备份PDIC】保留当前状态。\n\n继续？",
-            parent=self,
-        ):
-            return
-
-        project = self.project
-        settings = self.settings
-
-        def worker(index: int, _position: int, _total: int):
-            page = project.images[index]
-            target = pdic_path(page)
-            entries = read_pdic(target)
-            if not entries:
-                return (index, 0, False)
-            before = [(e.word, int(e.x), int(e.y)) for e in entries]
-            with Image.open(page) as opened:
-                width, height = map(int, opened.size)
-            geometry = derive_nominal_geometry(width, height, settings)
-            ordered = sort_entries_column_y(
-                entries, geometry, read_page_sections(page),
-            )
-            after = [(e.word, int(e.x), int(e.y)) for e in ordered]
-            previous = project.images[index - 1].stem if index > 0 else "@"
-            following = project.images[index + 1].stem if index + 1 < len(project.images) else "@"
-            _write_pdic_atomic(target, ordered, width, (page.stem, previous, following))
-            return (index, len(ordered), before != after)
-
-        def done(completed: int, total: int, stopped: bool, results, error) -> None:
-            if error is not None:
-                return
-            changed = sum(1 for result in results if result and result[2])
-            records = sum(int(result[1]) for result in results if result)
-            if self.current_index in existing:
-                self.load_page(self.current_index)
-            state = "已停止" if stopped else "完成"
-            self.status_var.set(
-                f"修复排序{state}：处理 {completed}/{total} 页；实际改序 {changed} 页；{records} 条记录"
-            )
-
-        self._start_batch_task(
-            "修复排序", existing, worker, done,
-            item_label=lambda i: project.images[i].name,
-        )
+        self._export_controller_for_call().repair_pdic_order_selected_scope()
 
     def export_picdic_index(self) -> None:
-        """Export a project-wide four-column text index from saved PDIC records.
-
-        The output is intentionally simple for downstream PicDic conversion::
-
-            WORD<TAB>xx.xx<TAB>yy.yy<TAB>page
-
-        Percentages are taken from the persisted PDIC percentage fields rather
-        than recalculated from pixels.  This preserves the coordinate semantics
-        of the source PDIC, including legacy projects.  Large projects are
-        streamed in the background and never accumulated into one giant string.
-        """
-        if not self.project or not self.current_page or self.image is None:
-            messagebox.showinfo("尚未打开", "请先打开包含扫描图片的项目目录。", parent=self)
-            return
-        if self._batch_active:
-            self.status_var.set("已有批量任务正在运行，请结束后再导出PicDic索引。")
-            return
-        try:
-            self._flush_deferred_page_save()
-            self._sync_entry_editor_texts()
-            self.save_pdic(silent=True, sync_editors=False)
-        except Exception as exc:
-            self.show_error("导出PicDic索引失败", exc)
-            return
-
-        project = self.project
-        pages = [page for page in project.images if pdic_path(page).exists()]
-        if not pages:
-            messagebox.showinfo("导出PicDic索引", "当前项目没有可导出的 PDIC 文件。", parent=self)
-            return
-
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        target = exports_root(project.root) / f"PicDic_index_{stamp}.txt"
-        temp = target.with_name(f".{target.name}.tmp")
-        state: dict[str, object] = {"stream": None, "page_count": 0, "record_count": 0}
-
-        def worker(page: Path, _position: int, _total: int):
-            stream = state.get("stream")
-            if stream is None:
-                try:
-                    temp.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                stream = temp.open("w", encoding="utf-8", newline="\n")
-                state["stream"] = stream
-            records = read_picdic_index_records(pdic_path(page), fallback_page=page.stem)
-            if records:
-                stream.write("\n".join(records))
-                stream.write("\n")
-                state["page_count"] = int(state.get("page_count", 0)) + 1
-                state["record_count"] = int(state.get("record_count", 0)) + len(records)
-            return len(records)
-
-        def done(completed: int, total: int, stopped: bool, _results, error) -> None:
-            stream = state.get("stream")
-            if stream is not None:
-                try:
-                    stream.flush()
-                    stream.close()
-                except OSError:
-                    pass
-                state["stream"] = None
-            if error is not None or stopped:
-                try:
-                    temp.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                if error is None:
-                    self.status_var.set(
-                        f"PicDic索引导出已停止：完成 {completed}/{total} 页，未生成不完整索引。"
-                    )
-                return
-            try:
-                if not temp.exists():
-                    temp.write_text("", encoding="utf-8")
-                os.replace(temp, target)
-                page_count = int(state.get("page_count", 0))
-                record_count = int(state.get("record_count", 0))
-                self.status_var.set(
-                    f"PicDic索引导出完成：{target.name}｜{page_count} 页｜{record_count} 条"
-                )
-                messagebox.showinfo(
-                    "导出PicDic索引",
-                    f"已生成：\n{target}\n\n共 {page_count} 个有记录页面，{record_count} 条索引。\n"
-                    "格式：WORD\\txx.xx%\\tyy.yy%\\tpage",
-                    parent=self,
-                )
-            except Exception as exc:
-                try:
-                    temp.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                self.show_error("导出PicDic索引失败", exc)
-
-        self._start_batch_task(
-            "导出PicDic索引", pages, worker, done, item_label=lambda page: page.name,
-            refresh_page_quality=False,
-        )
+        self._export_controller_for_call().export_picdic_index()
 
     def backup_pdic(self) -> None:
-        """Stream every page PDIC into one timestamped backup without blocking Tk.
-
-        Large projects can contain thousands of tiny PDIC files.  Reading every
-        file and joining all records on the Tk thread made the window appear
-        frozen even though disk I/O was still progressing.  The backup now uses
-        the existing sequential background-task runner and writes each record
-        directly to a temporary output stream.  No page image pixels are read
-        and the full backup is never accumulated in memory.
-        """
-        if not self.project or not self.current_page or self.image is None:
-            messagebox.showinfo("尚未打开", "请先打开包含扫描图片的项目目录。", parent=self)
-            return
-        if self._batch_active:
-            self.status_var.set("已有批量任务正在运行，请结束后再备份PDIC。")
-            return
-        try:
-            self._flush_deferred_page_save()
-            self._sync_entry_editor_texts()
-            self.save_pdic(silent=True, sync_editors=False)
-        except Exception as exc:
-            self.show_error("备份PDIC失败", exc)
-            return
-
-        project = self.project
-        pages = [page for page in project.images if pdic_path(page).exists()]
-        if not pages:
-            messagebox.showinfo("备份PDIC", "当前项目没有可备份的 PDIC 文件。", parent=self)
-            return
-
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        target = exports_root(project.root) / f"all_pdic_backup_{stamp}.txt"
-        temp = target.with_name(f".{target.name}.tmp")
-        state: dict[str, object] = {"stream": None, "page_count": 0, "record_count": 0}
-
-        def worker(page: Path, _position: int, _total: int):
-            stream = state.get("stream")
-            if stream is None:
-                try:
-                    temp.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                stream = temp.open("w", encoding="utf-8", newline="\n")
-                state["stream"] = stream
-            source = pdic_path(page)
-            # Keep only one page in memory at a time.  This is substantially
-            # faster than per-line writes on Windows/network disks while still
-            # avoiding the old project-wide list/join memory spike.
-            page_lines = [
-                raw for raw in source.read_text(encoding="utf-8-sig").splitlines()
-                if raw.strip()
-            ]
-            count = len(page_lines)
-            if count:
-                stream.write("\n".join(page_lines))
-                stream.write("\n")
-                state["page_count"] = int(state.get("page_count", 0)) + 1
-                state["record_count"] = int(state.get("record_count", 0)) + count
-            return count
-
-        def done(completed: int, total: int, stopped: bool, _results, error) -> None:
-            stream = state.get("stream")
-            if stream is not None:
-                try:
-                    stream.flush()
-                    stream.close()
-                except OSError:
-                    pass
-                state["stream"] = None
-            if error is not None or stopped:
-                try:
-                    temp.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                if error is None:
-                    self.status_var.set(f"PDIC备份已停止：完成 {completed}/{total} 页，未生成不完整备份。")
-                return
-            try:
-                if not temp.exists():
-                    temp.write_text("", encoding="utf-8")
-                os.replace(temp, target)
-                page_count = int(state.get("page_count", 0))
-                record_count = int(state.get("record_count", 0))
-                self.status_var.set(
-                    f"PDIC备份完成：{target.name}｜{page_count} 页｜{record_count} 条"
-                )
-                messagebox.showinfo(
-                    "备份PDIC",
-                    f"已生成：\n{target}\n\n包含 {page_count} 个有记录页面，共 {record_count} 条 PDIC。",
-                    parent=self,
-                )
-            except Exception as exc:
-                try:
-                    temp.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                self.show_error("备份PDIC失败", exc)
-
-        self._start_batch_task(
-            "备份PDIC", pages, worker, done, item_label=lambda page: page.name,
-            refresh_page_quality=False,
-        )
+        self._export_controller_for_call().backup_pdic()
 
     def restore_from_pdic_backup(self) -> None:
-        """Rebuild the selected page range from one PDIC backup text.
-
-        The selected range is authoritative: every selected page is overwritten.
-        If a selected page has no records in the merged source, its PDIC is
-        replaced by an empty file instead of borrowing records from adjacent
-        pages.  Parsing and per-page commits run off the Tk thread.
-        """
-        if not self.project or not self.current_page or self.image is None:
-            messagebox.showinfo("尚未打开", "请先打开包含扫描图片的项目目录。", parent=self)
-            return
-        if self._batch_active:
-            messagebox.showinfo("批量任务正在运行", "已有批量任务正在运行，请先暂停或停止。", parent=self)
-            return
-        try:
-            indices = self.selected_page_indices()
-        except Exception as exc:
-            self.show_error("页面范围无效", exc)
-            return
-        if not indices:
-            return
-
-        path_text = filedialog.askopenfilename(
-            title="选择备份的PDIC 备份 文本",
-            initialdir=str(self.project.root),
-            filetypes=[("PDIC/文本", "*.pdic *.txt"), ("PDIC", "*.pdic"), ("文本", "*.txt"), ("全部", "*")],
-            parent=self,
-        )
-        if not path_text:
-            return
-        source = Path(path_text)
-        if not messagebox.askyesno(
-            "恢复PDIC",
-            f"将从：\n{source.name}\n\n覆盖重建主界面所选范围内的 {len(indices)} 个页面 PDIC。\n"
-            "范围外页面不会修改。PDIC 备份 中若某个选定页面没有记录，该页会被重建为空 PDIC。\n\n"
-            "每页完成后立即原子覆盖，可暂停或停止；已完成页面不会回滚。继续？",
-            parent=self,
-        ):
-            return
-
-        try:
-            # Commit the visible page before the destructive range restore begins.
-            # Navigation/editing is blocked while this non-foreground batch runs,
-            # so no stale canvas copy can overwrite a restored page afterward.
-            self._flush_deferred_page_save()
-            self._sync_entry_editor_texts()
-            self.save_pdic(silent=True, sync_editors=False)
-        except Exception as exc:
-            self.show_error("PDIC 备份 恢复准备失败", exc)
-            return
-
-        project = self.project
-        settings_snapshot = replace(self.settings)
-        pages = list(project.images)
-        page_stems = [page.stem for page in pages]
-        pages_meta = {i: self.pages_tuple(i) for i in indices}
-        parsed_holder: dict[str, object] = {"mapping": None, "stats": None}
-        parse_lock = threading.Lock()
-
-        def ensure_parsed() -> tuple[dict[str, list[WordEntry]], dict[str, int]]:
-            mapping = parsed_holder.get("mapping")
-            stats = parsed_holder.get("stats")
-            if isinstance(mapping, dict) and isinstance(stats, dict):
-                return mapping, stats
-            with parse_lock:
-                mapping = parsed_holder.get("mapping")
-                stats = parsed_holder.get("stats")
-                if not isinstance(mapping, dict) or not isinstance(stats, dict):
-                    text_data, _encoding = read_text_detected(source)
-                    mapping, stats = _parse_merged_pdic_text(text_data, page_stems)
-                    parsed_holder["mapping"] = mapping
-                    parsed_holder["stats"] = stats
-            return mapping, stats
-
-        def worker(index: int, _position: int, _total: int):
-            mapping, stats = ensure_parsed()
-            page = pages[index]
-            # Copy the list so writing this page cannot mutate the shared parsed
-            # source.  The merged file remains a read-only source of truth.
-            entries = [replace(entry) for entry in mapping.get(page.stem, [])]
-            with Image.open(page) as opened:
-                width, height = map(int, opened.size)
-            entries = sort_entries_reading_order(
-                entries, derive_nominal_geometry(width, height, settings_snapshot),
-                read_page_sections(page),
-            )
-            _write_pdic_atomic(pdic_path(page), entries, width, pages_meta[index])
-            return {
-                "index": index,
-                "records": len(entries),
-                "empty": not entries,
-                "source_records": int(stats.get("records", 0)),
-                "source_matched": int(stats.get("matched", 0)),
-                "source_unmatched": int(stats.get("unmatched", 0)),
-            }
-
-        def done(completed, total_pages, stopped, results, error):
-            if error is not None:
-                return
-            rebuilt = 0
-            records = 0
-            empty_pages = 0
-            completed_indices: set[int] = set()
-            stats = parsed_holder.get("stats") if isinstance(parsed_holder.get("stats"), dict) else {}
-            for result in results:
-                if not isinstance(result, dict):
-                    continue
-                index = int(result.get("index", -1))
-                if index >= 0:
-                    completed_indices.add(index)
-                rebuilt += 1
-                records += int(result.get("records", 0) or 0)
-                empty_pages += int(bool(result.get("empty")))
-
-            # A previous TXT-fill count check no longer describes a page that
-            # has just been rebuilt from the merged PDIC source. Remove both the
-            # visible warning and its persisted expected-count record.
-            self._clear_word_fill_checks_for_indices(completed_indices, persist=True)
-            for index in completed_indices:
-                self._update_page_row(index)
-            self._schedule_page_cell_overlay_refresh()
-            if self.current_index in completed_indices:
-                self.load_page(self.current_index)
-
-            unmatched = int(stats.get("unmatched", 0) or 0)
-            if stopped:
-                self.status_var.set(
-                    f"PDIC 备份 恢复已停止：完成 {completed}/{total_pages} 页，重建 {records} 条；"
-                    f"空页 {empty_pages} 页"
-                )
-            else:
-                extra = f"；源文件有 {unmatched} 条记录未对应当前项目页面" if unmatched else ""
-                self.status_var.set(
-                    f"PDIC 备份 恢复完成：{rebuilt}/{total_pages} 页，重建 {records} 条；"
-                    f"空页 {empty_pages} 页{extra}"
-                )
-
-        started = self._start_batch_task(
-            "恢复PDIC",
-            indices,
-            worker,
-            done,
-            item_label=lambda i: pages[i].name,
-            foreground_page_edit=False,
-        )
-        if started:
-            self.batch_text_var.set(f"恢复PDIC：准备读取备份文件 0/{len(indices)}")
-            self.status_var.set(
-                f"正在后台解析PDIC 备份 并逐页覆盖重建：共 {len(indices)} 页；"
-                "进度按页面更新，可暂停或停止。"
-            )
+        self._export_controller_for_call().restore_from_pdic_backup()
 
     def restore_from_merged_pdic(self) -> None:
         """Backward-compatible alias for old integrations."""
         self.restore_from_pdic_backup()
 
-    @staticmethod
-    def _word_fill_file_signature(path: Path) -> tuple[str, int, int]:
-        stat = path.stat()
-        return (str(path.resolve()), int(stat.st_mtime_ns), int(stat.st_size))
+    def _headword_controller_for_call(self) -> HeadwordController:
+        controller = self.__dict__.get("headword_controller")
+        if controller is None:
+            controller = HeadwordController(
+                self,
+                parse_words_of_pages_text=_parse_words_of_pages_text,
+                fill_page_entries=_fill_page_entries,
+            )
+            self.__dict__["headword_controller"] = controller
+        return controller
 
     def select_existing_headwords_file(self) -> None:
-        """Choose the page-aware TXT used by subsequent fill operations.
-
-        Selection is deliberately separate from filling: a large dictionary can
-        be parsed once, then the user may change the main page range and refill
-        mismatch pages repeatedly without reopening the file picker.
-        """
-        if not self.project:
-            messagebox.showinfo("尚未打开", "请先打开包含扫描图片的项目目录。", parent=self)
-            return
-        if self._batch_active:
-            messagebox.showinfo("批量任务正在运行", "已有批量任务正在运行，请先暂停或停止。", parent=self)
-            return
-        initialdir = self.project.root
-        initialfile = "_WordsOfPages.txt"
-        if self._word_fill_source_path is not None:
-            initialdir = self._word_fill_source_path.parent
-            initialfile = self._word_fill_source_path.name
-        path_text = filedialog.askopenfilename(
-            title="选择包含既有词条的 TXT",
-            initialdir=str(initialdir),
-            initialfile=initialfile,
-            filetypes=[("文本", "*.txt"), ("全部", "*")],
-            parent=self,
-        )
-        if not path_text:
-            return
-        path = Path(path_text)
-        try:
-            signature = self._word_fill_file_signature(path)
-        except Exception as exc:
-            self.show_error("词条文件不可用", exc)
-            return
-
-        # Re-selecting an unchanged source keeps the already parsed mapping.
-        # Choosing another file, or choosing a changed version of the same file,
-        # invalidates only the parse cache; no PDIC is touched at this stage.
-        if signature != self._word_fill_source_signature:
-            self._word_fill_source_mapping = None
-            self._word_fill_source_present_pages = None
-        self._word_fill_source_path = path
-        self._word_fill_source_signature = signature
-        cached = "（已缓存解析结果）" if self._word_fill_source_mapping is not None else ""
-        self.status_var.set(f"已选择词条文件：{path.name}{cached}；调整页面范围后点击[填充词条]。")
+        self._headword_controller_for_call().select_existing_headwords_file()
 
     def fill_existing_headwords(self) -> None:
-        """Fill the selected range from the already chosen page-aware TXT.
-
-        The source file picker is intentionally *not* opened here.  Once a file
-        has been selected, the parsed mapping survives repeated fill batches in
-        this project. If the source changes on disk, its signature invalidates
-        the cache and the next batch reparses it in the worker thread.
-        """
-        if not self.project or not self.current_page or self.image is None:
-            messagebox.showinfo("尚未打开", "请先打开包含扫描图片的项目目录。", parent=self)
-            return
-        if self._batch_active:
-            messagebox.showinfo("批量任务正在运行", "已有批量任务正在运行，请先暂停或停止。", parent=self)
-            return
-        if self._word_fill_source_path is None:
-            messagebox.showinfo("尚未选择词条文件", "请先点击[选择词条文件]，再执行填充。", parent=self)
-            return
-        try:
-            indices = self.selected_page_indices()
-        except Exception as exc:
-            self.show_error("页面范围无效", exc)
-            return
-        if not indices:
-            return
-
-        txt_path = self._word_fill_source_path
-        try:
-            current_signature = self._word_fill_file_signature(txt_path)
-        except Exception as exc:
-            self.show_error("词条文件不可用", exc)
-            return
-        if current_signature != self._word_fill_source_signature:
-            self._word_fill_source_signature = current_signature
-            self._word_fill_source_mapping = None
-            self._word_fill_source_present_pages = None
-
-        try:
-            # Commit any live Entry edits before the worker starts reading PDIC.
-            # During this task foreground page edits/navigation are intentionally
-            # blocked, so a worker can never race a stale canvas copy.
-            self._flush_deferred_page_save()
-            self._sync_entry_editor_texts()
-            self.save_pdic(silent=True, sync_editors=False)
-        except Exception as exc:
-            self.show_error("填充词条失败", exc)
-            return
-
-        project = self.project
-        settings_snapshot = replace(self.settings)
-        pages = list(project.images)
-        page_stems = [page.stem for page in pages]
-        pages_meta = [
-            (page.stem, pages[i - 1].stem if i > 0 else "@", pages[i + 1].stem if i + 1 < len(pages) else "@")
-            for i, page in enumerate(pages)
-        ]
-        # A holder local to this batch avoids any race where the first worker
-        # resolves the app-level cache while subsequent page commits start.
-        mapping_holder = {
-            "value": self._word_fill_source_mapping,
-            "present": self._word_fill_source_present_pages,
-        }
-
-        def ensure_mapping() -> tuple[dict[str, list[str]], set[str]]:
-            mapping = mapping_holder["value"]
-            present = mapping_holder["present"]
-            if mapping is None or present is None:
-                text_data, _detected_encoding = read_text_detected(txt_path)
-                present = set()
-                mapping = _parse_words_of_pages_text(text_data, page_stems, present_pages=present)
-                mapping_holder["value"] = mapping
-                mapping_holder["present"] = present
-            return mapping, present
-
-        def worker(index: int, _position: int, _total: int):
-            mapping, present_pages = ensure_mapping()
-            page = pages[index]
-            entries = read_pdic(pdic_path(page))
-            with Image.open(page) as opened:
-                width, height = map(int, opened.size)
-            entries = sort_entries_reading_order(
-                entries, derive_nominal_geometry(width, height, settings_snapshot),
-                read_page_sections(page),
-            )
-            has_data = page.stem in present_pages
-            words = list(mapping.get(page.stem, [])) if has_data else []
-            filled, line_count, word_count = _fill_page_entries(entries, words)
-
-            # Empty pages stay empty; a page with TXT words but no lines must not
-            # get a fabricated PDIC. Each completed page is its own commit point.
-            if entries or pdic_path(page).exists():
-                write_pdic(pdic_path(page), entries, width, pages_meta[index])
-            return {
-                "index": index,
-                "filled": filled,
-                "line_count": line_count,
-                "word_count": word_count,
-                "has_data": has_data,
-                "mismatch": has_data and line_count != word_count,
-            }
-
-        def done(completed, total_pages, stopped, results, error):
-            if error is not None:
-                return
-            if (
-                self.project is project
-                and self._word_fill_source_path == txt_path
-                and self._word_fill_source_signature == current_signature
-            ):
-                mapping = mapping_holder.get("value")
-                present = mapping_holder.get("present")
-                if isinstance(mapping, dict) and isinstance(present, set):
-                    self._word_fill_source_mapping = mapping
-                    self._word_fill_source_present_pages = present
-            filled_total = 0
-            mismatch_count = 0
-            no_data_count = 0
-            completed_indices: set[int] = set()
-            for result in results:
-                if not isinstance(result, dict):
-                    continue
-                index = int(result.get("index", -1))
-                if index < 0:
-                    continue
-                completed_indices.add(index)
-                filled_total += int(result.get("filled", 0) or 0)
-                line_count = int(result.get("line_count", 0) or 0)
-                word_count = int(result.get("word_count", 0) or 0)
-                has_data = bool(result.get("has_data", True))
-                self._record_word_fill_check(
-                    index, line_count, word_count, source=txt_path.name, has_data=has_data,
-                    persist=False, refresh_overlay=False, refresh_row=False,
-                )
-                if not has_data:
-                    no_data_count += 1
-                elif line_count != word_count:
-                    mismatch_count += 1
-
-            if completed_indices:
-                self._persist_word_fill_status()
-            if self.current_index in completed_indices:
-                self.load_page(self.current_index)
-
-            source_name = txt_path.name
-            if stopped:
-                self.status_var.set(
-                    f"既有词条填充已停止：完成 {completed}/{total_pages} 页，填入 {filled_total} 个词条；"
-                    f"已完成页面中数量不一致 {mismatch_count} 页，无资料 {no_data_count} 页；来源：{source_name}"
-                )
-            else:
-                self.status_var.set(
-                    f"既有词条填充完成：{completed}/{total_pages} 页，填入 {filled_total} 个词条；"
-                    f"数量不一致 {mismatch_count} 页（填充状态格淡红提示），无资料 {no_data_count} 页；来源：{source_name}"
-                )
-
-        started = self._start_batch_task(
-            "填充词条",
-            indices,
-            worker,
-            done,
-            item_label=lambda i: pages[i].name,
-            foreground_page_edit=False,
-        )
-        if started:
-            cached = self._word_fill_source_mapping is not None
-            phase = "使用已缓存词条索引" if cached else "准备读取并解析词条文件"
-            self.batch_text_var.set(f"填充词条：{phase} 0/{len(indices)}")
-            self.status_var.set(
-                f"正在后台逐页填充：共 {len(indices)} 页；来源：{txt_path.name}；"
-                "进度按页面更新，可暂停或停止。"
-            )
+        self._headword_controller_for_call().fill_existing_headwords()
 
     def import_legacy_words(self) -> bool:
         """Import legacy words in a sequential background batch.

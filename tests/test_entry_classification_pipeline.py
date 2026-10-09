@@ -2,17 +2,61 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 
 from picture_capture.entry_classification import (
     apply_classification_sidecar,
+    classification_sidecar_path,
     classified_entry_crop_height,
     get_entry_classification,
+    install_pdic_classification,
     register_layout_line_classification,
     set_entry_scale_manual,
     write_classification_sidecar,
 )
+from picture_capture.entry_classification_fields import install_entry_classification_fields
 from picture_capture.models import AppSettings, Entry
+from picture_capture.training_baseline import (
+    baseline_path_for_pdic,
+    build_write_pdic_capture,
+)
+
+
+def test_entry_classification_descriptors_are_static_and_installer_is_inert():
+    names = (
+        "entry_source",
+        "entry_scale",
+        "detected_head_height",
+        "entry_scale_manual",
+    )
+    before = {name: Entry.__dict__[name] for name in names}
+    assert all(isinstance(value, property) for value in before.values())
+
+    install_entry_classification_fields()
+
+    assert {name: Entry.__dict__[name] for name in names} == before
+
+
+def test_entry_classification_fields_work_without_core_bootstrap():
+    script = """
+from picture_capture.models import Entry
+entry = Entry(word="", x=10, y=20, ocr_source="ordinary_symbol_evidence")
+assert entry.entry_source == "symbol_sample"
+assert entry.entry_scale == "regular"
+entry.entry_scale = "oversized"
+assert entry.entry_scale == "oversized"
+entry.entry_scale_manual = True
+assert entry.entry_scale_manual is True
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_entry_exposes_canonical_classification_fields():
@@ -139,38 +183,196 @@ def test_manual_override_survives_small_separator_y_move(tmp_path: Path):
     assert get_entry_classification(moved).entry_scale == "regular"
 
 
-def test_review_and_marker_ocr_are_wired_to_canonical_classification():
-    import picture_capture.entry_classification_runtime as runtime
+class _ReviewVar:
+    def __init__(self, value=""):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def set(self, value):
+        self.value = value
+
+
+def test_static_review_classification_helpers_sync_and_persist_change(monkeypatch):
     import picture_capture.review_entry_classification_ui as review
 
-    runtime_source = Path(runtime.__file__).read_text(encoding="utf-8")
+    entry = Entry(
+        word="",
+        x=4041,
+        y=9107,
+        current_page="phase12t-static-helper",
+        ocr_source="ordinary_large_head_evidence",
+        ocr_visual_run_height=84.0,
+        ocr_oversized_cjk=True,
+    )
+    events = []
+    window = SimpleNamespace(
+        active_index=0,
+        entry_scale_classification_var=_ReviewVar(),
+        entry_source_classification_var=_ReviewVar(),
+        _bound_row_entries=lambda: [entry],
+        _request_render_rows=lambda **kwargs: events.append(("render", kwargs)),
+        parent=SimpleNamespace(redraw=lambda: events.append(("redraw",))),
+    )
+
+    review.sync_review_entry_classification(window)
+    assert window.entry_scale_classification_var.get() == "自动"
+    assert "当前：大字头" in window.entry_source_classification_var.get()
+
+    monkeypatch.setattr(review, "_persist", lambda current: events.append(("persist", current)))
+    window.entry_scale_classification_var.set("普通词条")
+    review.change_review_entry_classification(window)
+
+    meta = get_entry_classification(entry)
+    assert meta.entry_scale == "regular"
+    assert meta.manual_override is True
+    assert events[0][0] == "persist"
+    assert events[1] == ("render", {"focus_index": 0})
+    assert events[2] == ("redraw",)
+
+
+def test_review_and_marker_ocr_are_wired_to_canonical_classification():
+    import picture_capture.app as app_module
+    import picture_capture.processing_core as processing_core
+    import picture_capture.review_entry_classification_ui as review
+
+    marker_ocr_source = Path(processing_core.__file__).read_text(encoding="utf-8")
+    app_source = Path(app_module.__file__).read_text(encoding="utf-8")
     review_source = Path(review.__file__).read_text(encoding="utf-8")
 
-    # Marker OCR now delegates crop geometry to the shared entry_ocr_crop layer;
-    # proofreading retains the same canonical regular/oversized classification.
-    assert "entry_ocr_crop_box(" in runtime_source
-    assert "resolve_entry_ocr_row_metrics(" in runtime_source
-    assert 'meta.entry_scale == "oversized"' in runtime_source
-    assert "classified_entry_crop_height(" in review_source
-    assert "entry_regular_crop_height" in review_source
-    assert "entry_oversized_crop_height" in review_source
-    assert "_is_single_cjk_review_headword" not in review_source
+    # Marker OCR and proofreading use the same canonical regular/oversized
+    # classification without a runtime replacement of _review_line_box.
+    assert "entry_ocr_crop_box(" in marker_ocr_source
+    assert "resolve_entry_ocr_row_metrics(" in marker_ocr_source
+    assert 'meta.entry_scale == "oversized"' in marker_ocr_source
+    review_start = app_source.index("def _review_line_box(")
+    review_end = app_source.index("\ndef _apply_focused_review_page_updates", review_start)
+    review_line_box = app_source[review_start:review_end]
+    assert "classified_entry_crop_height(" in review_line_box
+    assert "entry_regular_crop_height" in review_line_box
+    assert "entry_oversized_crop_height" in review_line_box
+    assert "_is_single_cjk_review_headword" not in app_source
     assert '("自动", "普通词条", "大字头")' in review_source
 
 
-def test_gui_composition_installs_classification_before_app_and_review_ui_after_app():
+def test_gui_composition_uses_static_pdic_io_and_review_classification():
+    import picture_capture.app as app_module
     import picture_capture.bootstrap.gui as gui_bootstrap
+    import picture_capture.gui_io as gui_io
 
     source = Path(gui_bootstrap.__file__).read_text(encoding="utf-8")
-    assert "install_pdic_classification(formats)" in source
-    assert "install_processing_entry_classification(processing_module)" in source
-    assert "install_review_entry_classification(app_module)" in source
-    assert source.index("install_processing_entry_classification(processing_module)") < source.index(
-        "from .. import app as app_module"
+    assert "install_pdic_classification(formats)" not in source
+    assert "formats.write_pdic =" not in source
+    assert "build_write_pdic_capture" not in source
+    assert "install_processing_entry_classification" not in source
+    assert "entry_classification_runtime" not in source
+    assert app_module.write_pdic is gui_io.write_pdic
+    assert app_module.read_pdic is gui_io.read_pdic
+    assert "install_review_entry_classification(app_module)" not in source
+
+    app_source = Path(app_module.__file__).read_text(encoding="utf-8")
+    assert "initialize_review_entry_classification(self)" in app_source
+    assert app_source.count("sync_review_entry_classification(self)") >= 2
+    assert '"大字头切图高："' in app_source
+
+
+def test_gui_baseline_capture_wraps_core_classification_without_reinstall(tmp_path: Path):
+    writes: list[list[Entry]] = []
+
+    def read_pdic(_path: Path) -> list[Entry]:
+        return []
+
+    def write_pdic(
+        path: Path,
+        entries: list[Entry],
+        _image_width: int,
+        _pages: tuple[str, str, str],
+    ) -> None:
+        writes.append(list(entries))
+        path.write_text("pdic\n", encoding="utf-8")
+
+    formats_module = SimpleNamespace(read_pdic=read_pdic, write_pdic=write_pdic)
+    install_pdic_classification(formats_module)
+    classification_writer = formats_module.write_pdic
+
+    formats_module.write_pdic = build_write_pdic_capture(formats_module.write_pdic)
+    composed_writer = formats_module.write_pdic
+    assert composed_writer._original_write_pdic is classification_writer
+
+    # A second classification install is intentionally a no-op. GUI therefore
+    # does not need to repeat the core-owned installation after adding baseline
+    # capture.
+    install_pdic_classification(formats_module)
+    assert formats_module.write_pdic is composed_writer
+
+    pdic = tmp_path / "page.pdic"
+    automatic = [
+        Entry(
+            word="",
+            x=42,
+            y=84,
+            confidence=0.97,
+            ocr_source="ordinary_page_design",
+            issue_type="ORDINARY_PAGE_DESIGN_ENTRY",
+        )
+    ]
+    formats_module.write_pdic(
+        pdic,
+        automatic,
+        1200,
+        ("page.png", "@", "@"),
     )
-    assert source.index("from .. import app as app_module") < source.index(
-        "install_review_entry_classification(app_module)"
-    )
+
+    assert baseline_path_for_pdic(pdic).exists()
+    assert classification_sidecar_path(pdic).exists()
+    assert pdic.exists()
+    assert len(writes) == 1
+
+
+def test_gui_pdic_io_resolves_current_formats_callables_at_call_time(
+    tmp_path: Path, monkeypatch,
+):
+    import picture_capture.gui_io as gui_io
+    from picture_capture import formats
+
+    reads: list[Path] = []
+    writes: list[tuple[Path, list[Entry]]] = []
+
+    def current_read(path: Path) -> list[Entry]:
+        reads.append(path)
+        return [Entry(word="read", x=1, y=2)]
+
+    def current_write(
+        path: Path,
+        entries: list[Entry],
+        _image_width: int,
+        _pages: tuple[str, str, str],
+    ) -> None:
+        writes.append((path, list(entries)))
+        path.write_text("pdic\n", encoding="utf-8")
+
+    monkeypatch.setattr(formats, "read_pdic", current_read)
+    monkeypatch.setattr(formats, "write_pdic", current_write)
+
+    pdic = tmp_path / "page.pdic"
+    assert gui_io.read_pdic(pdic)[0].word == "read"
+    assert reads == [pdic]
+
+    automatic = [
+        Entry(
+            word="",
+            x=42,
+            y=84,
+            confidence=0.97,
+            ocr_source="ordinary_page_design",
+            issue_type="ORDINARY_PAGE_DESIGN_ENTRY",
+        )
+    ]
+    gui_io.write_pdic(pdic, automatic, 1200, ("page.png", "@", "@"))
+
+    assert baseline_path_for_pdic(pdic).exists()
+    assert writes == [(pdic, automatic)]
 
 
 def test_core_composition_installs_classification_for_non_gui_consumers():
@@ -191,8 +393,14 @@ def test_core_composition_installs_classification_for_non_gui_consumers():
     assert "install_entry_crop_settings()" not in package_source
     assert "install_entry_classification_fields()" not in package_source
     assert "install_pdic_classification(_formats)" not in package_source
-    assert "install_entry_crop_settings()" in core_source
-    assert "install_entry_classification_fields()" in core_source
+    assert "install_entry_crop_settings()" not in core_source
+    assert "install_entry_classification_fields()" not in core_source
     assert "install_pdic_classification(formats)" in core_source
     assert bool(getattr(formats, "_entry_classification_installed", False))
-    assert bool(getattr(processing, "_entry_classification_runtime_installed", False))
+    assert processing._ordinary_marker_local_crop is processing._core._ordinary_marker_local_crop
+    assert (
+        processing.ocr_existing_entry_words_from_markers
+        is processing._core.ocr_existing_entry_words_from_markers
+    )
+    assert "install_processing_entry_classification" not in core_source
+    assert "entry_classification_runtime" not in core_source

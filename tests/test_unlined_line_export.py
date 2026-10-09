@@ -9,6 +9,7 @@ from PIL import Image, ImageDraw
 from picture_capture.models import Entry
 from picture_capture.unlined_export_filter_settings import (
     BLANK_INK_PERCENT_KEY,
+    DEFAULT_BLANK_INK_PERCENT,
     FILTER_BLANK_KEY,
     FILTER_ENABLED_KEY,
     load_unlined_filter_settings,
@@ -246,27 +247,43 @@ def test_unlined_filter_settings_share_crop_store_and_preserve_existing_keys(tmp
     assert load_unlined_filter_settings(root) == (True, True, 1.2)
 
 
-def test_unlined_ui_is_installed_after_single_line_button_and_reuses_parallel_crop_setting():
+def test_unlined_ui_is_explicit_and_reuses_parallel_crop_setting():
     root = Path(__file__).resolve().parents[1]
     composition = (
         root / "src" / "picture_capture" / "bootstrap" / "gui.py"
     ).read_text(encoding="utf-8")
-    ui = (root / "src" / "picture_capture" / "unlined_line_export_ui.py").read_text(encoding="utf-8")
+    controller = (
+        root / "src" / "picture_capture" / "ui" / "controllers" / "crop.py"
+    ).read_text(encoding="utf-8")
+    app_source = (root / "src" / "picture_capture" / "app.py").read_text(encoding="utf-8")
     exporter = (root / "src" / "picture_capture" / "unlined_line_export.py").read_text(encoding="utf-8")
     filters = (root / "src" / "picture_capture" / "unlined_export_filter_settings.py").read_text(encoding="utf-8")
+    crop_ui = (
+        root / "src" / "picture_capture" / "ui" / "settings" / "crop.py"
+    ).read_text(encoding="utf-8")
+    crop_schema = (
+        root / "src" / "picture_capture" / "crop" / "settings.py"
+    ).read_text(encoding="utf-8")
 
-    assert 'install_postproduction_single_line_runtime(app_module)' in composition
-    assert 'install_unlined_line_export_ui(app_module)' in composition
-    assert 'install_unlined_export_filter_settings_ui(app_module)' in composition
-    assert composition.index('install_postproduction_single_line_runtime(app_module)') < composition.index(
-        'install_unlined_line_export_ui(app_module)'
-    )
-    assert '_BUTTON_TEXT = "未画线行导出"' in ui
-    assert '_LEFT_NEIGHBOR_TEXT = "单行切图"' in ui
-    assert '"after": target' in ui
+    assert "install_unlined_line_export_ui" not in composition
+    assert "unlined_line_export_ui" not in composition
+    assert "install_unlined_export_filter_settings_ui(app_module)" not in composition
+    assert "install_unlined_fast_path" not in composition
+    assert "unlined_fast_path_runtime" not in composition
+    assert (
+        '(("单行切图", self.split_single_lines_selected_scope), '
+        '("未画线行导出", self.export_unlined_rows_selected_scope), '
+        '("词条切图", self.split_entries_selected_scope), '
+        '("插图切图", self.split_illustrations_selected_scope))'
+    ) in app_source
+    assert "self._pc_single_line_crop_button = button" in app_source
+    assert "self._pc_unlined_export_button = button" in app_source
+    assert "def export_unlined_rows_selected_scope(self)" in app_source
+    assert "def export_unlined_rows_selected_scope(self)" in controller
+    assert "app._start_parallel_batch_task(" in controller
+    assert "unlined_export.export_unlined_page_job" in controller
     assert 'OUTPUT_DIRNAME = "PSW_UNLINED"' in exporter
-    assert 'configured_single_line_workers(project_root)' in exporter
-    assert 'get_context("spawn")' in exporter
+    assert "resolve_unlined_physical_rows" in exporter
     # Critical semantic locks: export is Layout-minus-PDIC, and blankness is
     # measured on the original row crop before white-border trimming.
     assert 'role == "body"' not in exporter
@@ -276,4 +293,11 @@ def test_unlined_ui_is_installed_after_single_line_button_and_reuses_parallel_cr
     )
     assert 'FILTER_LABEL = "未画线行导出过滤"' in filters
     assert 'BLANK_LABEL = "空白"' in filters
-    assert 'DEFAULT_BLANK_INK_PERCENT = 0.8' in filters
+    assert DEFAULT_BLANK_INK_PERCENT == 0.8
+    assert "dialog.__init__ =" not in filters
+    assert "setattr(dialog" not in filters
+    assert "UNLINED_FILTER_ENABLED_KEY" in crop_schema
+    assert "UNLINED_FILTER_BLANK_KEY" in crop_schema
+    assert "UNLINED_BLANK_INK_PERCENT_KEY" in crop_schema
+    assert "save_unlined_filter_settings(" in crop_ui
+    assert "filter_threshold_spin" in crop_ui

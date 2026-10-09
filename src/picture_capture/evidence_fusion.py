@@ -4,17 +4,23 @@ from __future__ import annotations
 
 The implementation is split deliberately: ``paddle_headwords_core`` keeps the
 large, battle-tested OCR/parsing engine unchanged, while this thin module adds
-supervised corrections learned from user-reviewed training exports. Internal
-core calls look up patched functions at runtime, so the wrapper can tighten or
-rescue decisions without duplicating the full OCR engine.
+supervised corrections learned from user-reviewed training exports. The wrapper
+passes those corrections through explicit core hooks, avoiding import-time core
+mutation while retaining the mature OCR engine unchanged.
 """
 
+from pathlib import Path
 from typing import Any
 import re
-import sys
-import types
+
+from PIL import Image
 
 from . import paddle_headwords_core as _core
+from .dictionary_profile import DictionaryProfile
+from .models import AppSettings, Entry
+from .page_sections import PageSection
+from .paddle_headwords_core import HeadwordFilterRule, OCRRecord
+from .separator_y_refinement import refine_separator_y as _shared_separator_y_refiner
 
 # Source-guard compatibility markers. The executable implementations live in
 # paddle_headwords_core.py; these exact markers remain here because established
@@ -25,16 +31,14 @@ from . import paddle_headwords_core as _core
 # _QUALITY_SUMMARY_LOCK = threading.Lock()
 
 
-# Re-export every public/private runtime symbol expected by the rest of Picture
-# Capture. Private helpers are intentionally included because tests, processing,
-# profile tooling and training export already consume several of them.
-for _name, _value in vars(_core).items():
-    if not _name.startswith("__"):
-        globals()[_name] = _value
+# This is an implementation module, not the historical broad compatibility
+# namespace. The public ``paddle_headwords`` facade owns core symbol re-exports.
 
 
 _original_filter_headword_records = _core.filter_headword_records
 _original_annotate_peer_typography_matches = _core._annotate_peer_typography_matches
+_original_detect_paddle_headwords = _core.detect_paddle_headwords
+_original_refine_separator_y = _core.refine_separator_y
 
 
 def _drop_peer_typography_match(row: dict[str, Any]) -> None:
@@ -441,6 +445,13 @@ def filter_headword_records(
     profile: DictionaryProfile | None = None,
     pixel_scale: float | None = None,
 ) -> tuple[list[Entry], list[dict[str, Any]]]:
+    peer_annotator = _core._annotate_peer_typography_matches
+    if peer_annotator is _original_annotate_peer_typography_matches:
+        peer_annotator = _annotate_peer_typography_matches
+    separator_refiner = _core.refine_separator_y
+    if separator_refiner is _original_refine_separator_y:
+        separator_refiner = _shared_separator_y_refiner
+
     entries, diagnostics = _original_filter_headword_records(
         records,
         band,
@@ -452,6 +463,8 @@ def filter_headword_records(
         engine_name=engine_name,
         profile=profile,
         pixel_scale=pixel_scale,
+        peer_typography_annotator=peer_annotator,
+        separator_y_refiner=separator_refiner,
     )
 
     cjk_count = _rescue_cjk_parser_failed_rows(
@@ -482,31 +495,35 @@ def filter_headword_records(
     return entries, diagnostics
 
 
-# Patch the core module itself because functions defined there resolve globals in
-# ``paddle_headwords_core`` at call time. Re-export the patched callables from
-# this compatibility module as well.
-_core._annotate_peer_typography_matches = _annotate_peer_typography_matches
-_core.filter_headword_records = filter_headword_records
-globals()["_annotate_peer_typography_matches"] = _annotate_peer_typography_matches
-globals()["filter_headword_records"] = filter_headword_records
+def detect_paddle_headwords(
+    image: Image.Image,
+    geometry: Any,
+    settings: AppSettings,
+    cache_path: Path | None = None,
+    force_refresh: bool = False,
+    engine: Any | None = None,
+    filter_rules_path: Path | None = None,
+    page_sections: list[PageSection] | None = None,
+) -> list[Entry]:
+    """Run the mature detector with supervised record filtering explicitly injected."""
+    record_filter = _core.filter_headword_records
+    if record_filter is _original_filter_headword_records:
+        record_filter = filter_headword_records
+    return _original_detect_paddle_headwords(
+        image,
+        geometry,
+        settings,
+        cache_path=cache_path,
+        force_refresh=force_refresh,
+        engine=engine,
+        filter_rules_path=filter_rules_path,
+        page_sections=page_sections,
+        record_filter=record_filter,
+    )
 
 
-class _CoreProxyModule(types.ModuleType):
-    """Mirror monkeypatch/debug assignments from compatibility module to core.
-
-    Existing tests and external tooling have long patched private names directly
-    on ``picture_capture.paddle_headwords``. Core functions resolve their globals
-    in ``paddle_headwords_core`` after the split, so assignments must be mirrored
-    transparently to preserve that contract.
-    """
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        types.ModuleType.__setattr__(self, name, value)
-        if name not in {"_core"} and hasattr(_core, name):
-            setattr(_core, name, value)
-
-
-sys.modules[__name__].__class__ = _CoreProxyModule
+# This implementation module keeps ordinary assignment semantics. The historical
+# public ``paddle_headwords`` facade remains the sole assignment-mirroring owner.
 
 
 __all__ = [

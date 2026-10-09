@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 import difflib
@@ -11,7 +11,6 @@ import math
 import os
 import re
 import subprocess
-import tempfile
 import threading
 import unicodedata
 from io import BytesIO
@@ -20,6 +19,33 @@ import numpy as np
 from PIL import Image, ImageOps
 
 from .models import AppSettings, Entry, resolved_tesseract_language
+from .paddle_headword_models import (
+    GrammarTailParse,
+    HeadwordFilterRule,
+    HeadwordParse,
+    OCRLine,
+    OCRRecord,
+)
+
+from .paddle_cache_storage import (
+    atomic_write_json_impl as _cache_atomic_write_json_impl,
+    atomic_write_text_impl as _cache_atomic_write_text_impl,
+    compact_cached_candidate_impl as _cache_compact_cached_candidate_impl,
+    compact_ocr_cache_file_impl as _cache_compact_ocr_cache_file_impl,
+    compact_ocr_cache_payload_impl as _cache_compact_ocr_cache_payload_impl,
+    regenerable_sidecars_impl as _cache_regenerable_sidecars_impl,
+)
+
+from .paddle_diagnostic_formatting import (
+    candidate_reason_impl as _diag_candidate_reason_impl,
+    candidate_tsv_row_impl as _diag_candidate_tsv_row_impl,
+    comparison_text_impl as _diag_comparison_text_impl,
+    diagnostic_text_impl as _diag_diagnostic_text_impl,
+    engines_long_text_impl as _diag_engines_long_text_impl,
+    fusion_text_impl as _diag_fusion_text_impl,
+    issues_text_impl as _diag_issues_text_impl,
+    tsv_clean_impl as _diag_tsv_clean_impl,
+)
 from .runtime_environment import resolve_paddle_device
 from .image_utils import normalize_page_rgb
 from .page_sections import PageSection, normalize_page_sections, section_index_for_v
@@ -40,82 +66,6 @@ from .visual_marker_templates import (
 
 if TYPE_CHECKING:
     from .processing import Geometry
-
-
-@dataclass(slots=True)
-class OCRRecord:
-    text: str
-    confidence: float
-    box: tuple[int, int, int, int]
-    # Synthetic records created when one pathological OCR detection box spans
-    # multiple physically separate display-head glyphs. Ordinary OCR records
-    # keep these fields empty, preserving existing constructors/equality.
-    recovery: str = ""
-    recovery_source_text: str = ""
-    parent_box: tuple[int, int, int, int] | None = None
-
-
-@dataclass(slots=True)
-class OCRLine:
-    """One visual text line assembled from one or more OCR records."""
-
-    text: str
-    confidence: float
-    box: tuple[int, int, int, int]
-    records: list[OCRRecord]
-    # Logical repairs applied after OCR grouping (right-fragment absorption,
-    # wrapped POS recovery, multi-line state-machine joins).  Keeping them on
-    # the line makes the parser/debug report explain *how* a synthetic line was
-    # assembled instead of only showing its final text.
-    logical_repairs: tuple[str, ...] = ()
-
-
-@dataclass(slots=True)
-class GrammarTailParse:
-    """Structured grammar tail produced after the display lemma.
-
-    The parser advances a cursor through morphology, POS, usage/labels and the
-    remaining definition.  Individual stages may still use small regexes, but
-    the overall decision is a state machine rather than one monolithic match.
-    """
-
-    variants: tuple[str, ...] = ()
-    inflections: tuple[str, ...] = ()
-    pos_text: str = ""
-    usage_text: str = ""
-    descriptor_text: str = ""
-    definition_text: str = ""
-    consumed: int = 0
-    stage: str = "lemma"
-    trace: tuple[str, ...] = ()
-
-
-@dataclass(slots=True)
-class HeadwordParse:
-    raw: str
-    normalized: str
-    has_pos: bool
-    pos_text: str
-    has_inflection: bool
-    inflection_text: str
-    has_descriptor: bool
-    descriptor_text: str
-    match_end: int
-    looks_like_continuation: bool = False
-    continuation_reason: str = ""
-    corrected_raw: str = ""
-    parse_text: str = ""
-    ocr_repairs: tuple[str, ...] = ()
-    # v2.0 structured grammar parse. These fields are deliberately explicit so
-    # diagnostics can show where parsing stopped instead of reducing the whole
-    # decision to one regular-expression match.
-    variants: tuple[str, ...] = ()
-    plural_text: str = ""
-    usage_text: str = ""
-    definition_text: str = ""
-    parser_stage: str = ""
-    parser_trace: tuple[str, ...] = ()
-    bug_types: tuple[str, ...] = ()
 
 
 _ENGINE_CACHE: dict[tuple[str, str, str, bool], Any] = {}
@@ -164,19 +114,6 @@ _RULE_KINDS = {
     "accept_line_contains", "accept_line_regex",
     "pos_exclude_exact", "pos_exclude_regex",
 }
-
-
-@dataclass(slots=True)
-class HeadwordFilterRule:
-    kind: str
-    value: str
-    line_number: int
-    source: str
-    regex: re.Pattern[str] | None = None
-
-    @property
-    def display(self) -> str:
-        return f"{self.kind}: {self.value}"
 
 
 def parse_headword_filter_rules(text: str, source: str = "") -> list[HeadwordFilterRule]:
@@ -918,7 +855,7 @@ def get_paddle_engine(settings: AppSettings) -> Any:
     # Avoid the PaddlePaddle 3.3.x CPU PIR/oneDNN incompatibility also for
     # ordinary OCR, not only the separate layout detector.
     os.environ["FLAGS_enable_pir_api"] = "0"
-    from .windows_gpu_runtime import configure_windows_nvidia_dlls
+    from .windows_gpu import configure_windows_nvidia_dlls
     configure_windows_nvidia_dlls()
     try:
         from paddleocr import PaddleOCR
@@ -4360,23 +4297,13 @@ def refine_separator_y_adaptive(
     lower_bound: int = 0,
     content_top: int | None = None,
     preceding_gap_hint: int | None = None,
+    fallback_refiner: Any | None = None,
 ) -> tuple[int, dict[str, Any]]:
-    """Refine a CJK separator by tracing the nearest blank band above the entry.
+    """Trace the nearest blank band above a CJK entry.
 
-    v2.8.16 deliberately stops classifying a whole page as loose/normal/dense.
-    The separator is a *local* boundary problem: starting from the OCR/visual
-    headword top, first locate the real onset of sustained ink (the OCR box may
-    begin a few pixels too high or already inside the glyph), then walk upward
-    and find the nearest run of consecutive near-blank rows.  The marker is
-    placed just above the ink onset with a small safety clearance, i.e. at the
-    lower edge of that blank band.  This keeps the rule visually attached to
-    the following headword for both oversized single Han heads and bracketed
-    compounds.
-
-    ``preceding_gap_hint`` is retained in the signature for cache/API
-    compatibility and diagnostics, but it no longer selects different geometry
-    modes.  If no stable local blank band exists, the legacy local valley
-    refiner remains the safe fallback for extremely dense print.
+    ``preceding_gap_hint`` remains for compatibility/diagnostics. When dense
+    print has no stable blank run, ``fallback_refiner`` selects the local-valley
+    fallback without changing the adaptive geometry policy.
     """
     if not settings.paddle_refine_separator_y or gray.size == 0:
         return int(coarse_y), {"enabled": False, "reason": "disabled", "adaptive_mode": "off"}
@@ -4578,9 +4505,10 @@ def refine_separator_y_adaptive(
         }
 
     # Extremely dense dictionaries can genuinely have no stable run of blank
-    # rows. Preserve the old local valley method as a fallback, but if it offers
-    # a bounded valley, use its lower edge so the marker still hugs the entry.
-    refined, legacy = refine_separator_y(
+    # rows. Preserve the local-valley fallback while allowing an explicit
+    # compatibility refiner to own the final geometry adapter.
+    refine_dense = fallback_refiner or refine_separator_y
+    refined, legacy = refine_dense(
         gray, coarse_y, line_h, settings,
         pixel_scale=pixel_scale,
         lower_bound=lower_bound,
@@ -4936,6 +4864,8 @@ def filter_headword_records(
     engine_name: str = "paddle",
     profile: DictionaryProfile | None = None,
     pixel_scale: float | None = None,
+    peer_typography_annotator: Any | None = None,
+    separator_y_refiner: Any | None = None,
 ) -> tuple[list[Entry], list[dict[str, Any]]]:
     """Select dictionary headwords using structure, geometry and visual cues.
 
@@ -4943,6 +4873,7 @@ def filter_headword_records(
     part-of-speech label. Size, ink density/boldness, special symbols and the
     gap before a line remain fallback evidence for entries without a POS label.
     """
+    refine_y = separator_y_refiner or refine_separator_y
     if profile is None and _is_chinese_ocr(settings):
         # Backward-compatible direct API behavior: before v2.10 Chinese parsing
         # was selected from OCR language alone. The full application pipeline
@@ -5582,9 +5513,10 @@ def filter_headword_records(
                 lower_bound=header_cutoff,
                 content_top=(int(image_boundary.get("ink_onset_y", y0)) if image_boundary else y0),
                 preceding_gap_hint=preceding_gap,
+                fallback_refiner=refine_y,
             )
         elif refine_candidate_geometry:
-            refined_band_y, separator_refinement = refine_separator_y(
+            refined_band_y, separator_refinement = refine_y(
                 separator_gray,
                 coarse_band_y,
                 max(2, y1 - y0),
@@ -5867,6 +5799,7 @@ def filter_headword_records(
                 lower_bound=header_cutoff,
                 content_top=run_start,
                 preceding_gap_hint=visual_gap_hint,
+                fallback_refiner=refine_y,
             )
             source_y = source_top + refined_band_y
             visual_anchor_band_y = int((visual_separator_refinement or {}).get("anchor_y", coarse_band_y))
@@ -6034,7 +5967,8 @@ def filter_headword_records(
                 deduplicated[-1] = item
         else:
             deduplicated.append(item)
-    peer_typography_match_count = _annotate_peer_typography_matches(diagnostics)
+    annotate_peer = peer_typography_annotator or _annotate_peer_typography_matches
+    peer_typography_match_count = annotate_peer(diagnostics)
     diagnostics.insert(0, {
         "meta": {
             "header_cutoff_band_y": header_cutoff,
@@ -7391,35 +7325,15 @@ _QUALITY_SUMMARY_LOCK = threading.Lock()
 
 def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
     """Publish OCR/cache text atomically and remove failed temporary files."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            "w", encoding=encoding, dir=path.parent,
-            prefix=f".{path.name}.", suffix=".tmp", delete=False,
-        ) as handle:
-            temp_path = Path(handle.name)
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_path, path)
-    except Exception:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
-        raise
+    _cache_atomic_write_text_impl(path, text, encoding=encoding)
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    """Write machine-owned OCR JSON compactly.
-
-    These files can contain thousands of OCR candidates. Pretty-printing them
-    adds substantial project size without helping normal users, so keep them
-    UTF-8/readable but remove structural whitespace.
-    """
-    _atomic_write_text(
+    """Write machine-owned OCR JSON compactly while honoring core overrides."""
+    _cache_atomic_write_json_impl(
         path,
-        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-        encoding="utf-8",
+        payload,
+        write_text=_atomic_write_text,
     )
 
 
@@ -7433,132 +7347,44 @@ _OCR_REGENERABLE_SIDECAR_SUFFIXES = (
 
 
 def _compact_cached_candidate(row: Any) -> Any:
-    """Keep only candidate fields required by Project Profile coverage diagnostics."""
-    if not isinstance(row, dict):
-        return row
-    if "meta" in row:
-        return {"meta": _source_only_persistence(row.get("meta") or {})}
-    compact: dict[str, Any] = {}
-    for key in ("box", "accepted", "reject_reason"):
-        if key in row:
-            compact[key] = _source_only_persistence(row[key])
-    features = row.get("features")
-    if isinstance(features, dict):
-        kept_features = {
-            key: features[key]
-            for key in (
-                "visual_marker_template_score",
-                "ordinary_strong_edge_visual_rescue",
-            )
-            if key in features
-        }
-        if kept_features:
-            compact["features"] = kept_features
-    return compact
+    """Keep only candidate fields required by Profile coverage diagnostics."""
+    return _cache_compact_cached_candidate_impl(
+        row,
+        source_only=_source_only_persistence,
+    )
 
 
 def compact_ocr_cache_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Return the reusable OCR cache in its compact persisted representation.
-
-    Runtime arbitration keeps rich per-engine diagnostics in memory. Persisted
-    cache only needs raw Paddle records for reuse, lightweight candidate facts
-    for Profile coverage, top-level review candidates for GUI review/manual
-    overrides, and final entries/quality metadata.
-    """
-    result = dict(payload)
-    compact_columns: list[dict[str, Any]] = []
-    for raw in list(payload.get("columns") or []):
-        if not isinstance(raw, dict):
-            continue
-        column: dict[str, Any] = {}
-        for key in ("column", "band_size", "ocr_records", "paddle_accepted_count"):
-            if key in raw:
-                column[key] = _source_only_persistence(raw[key])
-        candidates = [
-            _compact_cached_candidate(item)
-            for item in list(raw.get("candidates") or [])
-        ]
-        if candidates:
-            column["candidates"] = candidates
-        compact_columns.append(column)
-    result["columns"] = compact_columns
-    result["cache_storage"] = "compact-v1"
-    return _source_only_persistence(result)
+    """Return the reusable OCR cache in compact persisted representation."""
+    return _cache_compact_ocr_cache_payload_impl(
+        payload,
+        source_only=_source_only_persistence,
+        compact_candidate=_compact_cached_candidate,
+    )
 
 
 def _regenerable_sidecars(cache_path: Path) -> list[Path]:
-    return [
-        cache_path.with_name(f"{cache_path.stem}{suffix}")
-        for suffix in _OCR_REGENERABLE_SIDECAR_SUFFIXES
-    ]
+    return _cache_regenerable_sidecars_impl(
+        cache_path,
+        suffixes=_OCR_REGENERABLE_SIDECAR_SUFFIXES,
+    )
 
 
 def compact_ocr_cache_file(cache_path: Path) -> tuple[int, int, int]:
-    """Compact one existing page cache and delete only regenerable diagnostics.
-
-    Returns (before_bytes, after_bytes, removed_sidecars). The main cache
-    remains reusable and *_manual_selection.json is intentionally preserved
-    because it contains user decisions rather than disposable diagnostics.
-    """
-    cache_path = Path(cache_path)
-    before_bytes = 0
-    if cache_path.exists():
-        try:
-            before_bytes += int(cache_path.stat().st_size)
-        except OSError:
-            pass
-    sidecars = _regenerable_sidecars(cache_path)
-    for path in sidecars:
-        if path.exists():
-            try:
-                before_bytes += int(path.stat().st_size)
-            except OSError:
-                pass
-
-    if cache_path.exists():
-        payload = json.loads(cache_path.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict):
-            raise ValueError(f"OCR cache is not a JSON object: {cache_path.name}")
-        _atomic_write_json(cache_path, compact_ocr_cache_payload(payload))
-
-    removed = 0
-    for path in sidecars:
-        if not path.exists():
-            continue
-        path.unlink()
-        removed += 1
-
-    after_bytes = 0
-    if cache_path.exists():
-        try:
-            after_bytes += int(cache_path.stat().st_size)
-        except OSError:
-            pass
-    return before_bytes, after_bytes, removed
+    """Compact one page cache while preserving core monkeypatch semantics."""
+    return _cache_compact_ocr_cache_file_impl(
+        cache_path,
+        sidecar_paths=_regenerable_sidecars,
+        compact_payload=compact_ocr_cache_payload,
+        write_json=_atomic_write_json,
+    )
 
 def _tsv_clean(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, (list, tuple)):
-        value = ",".join(str(x) for x in value)
-    return str(value).replace("\t", " ").replace("\r", " ").replace("\n", " ")
+    return _diag_tsv_clean_impl(value)
 
 
 def _candidate_reason(cand: dict[str, Any]) -> str:
-    reasons = []
-    if cand.get("reject_reason"):
-        reasons.append(str(cand.get("reject_reason")))
-    if cand.get("parser_stage"):
-        reasons.append("stage=" + str(cand.get("parser_stage")))
-    bugs = list(cand.get("bug_types", []) or [])
-    if bugs:
-        reasons.append("bug=" + ",".join(str(x) for x in bugs))
-    trace = list(cand.get("parser_trace", []) or [])
-    if trace:
-        reasons.append("trace=" + ">".join(str(x) for x in trace[:8]))
-    if cand.get("alphabetical_warning"):
-        reasons.append("WARN:" + str(cand.get("alphabetical_warning")))
-    return ";".join(reasons)
+    return _diag_candidate_reason_impl(cand)
 
 
 def _candidate_tsv_row(
@@ -7568,45 +7394,15 @@ def _candidate_tsv_row(
     engine: str = "",
     extra_reason: str = "",
 ) -> str:
-    """Return one strict 12-column TSV row.
-
-    ``*_ocr_diagnostics.txt`` is deliberately rectangular: it has exactly one
-    header and every following physical line has exactly the same 12 fields.
-    Engine/record provenance is kept in the final ``reason`` field so the
-    user-requested column order remains unchanged.
-    """
-    status = raw_status if raw_status is not None else ("accept" if cand.get("accepted") else "reject")
-    reason_parts: list[str] = []
-    if engine:
-        reason_parts.append(f"engine={engine}")
-    if raw_status == "raw":
-        reason_parts.append("record=raw")
-    elif raw_status == "rescued":
-        reason_parts.append("record=rescued")
-    elif raw_status == "error":
-        reason_parts.append("record=error")
-    else:
-        reason_parts.append("record=candidate")
-    candidate_reason = _candidate_reason(cand)
-    if candidate_reason:
-        reason_parts.append(candidate_reason)
-    if extra_reason:
-        reason_parts.append(extra_reason)
-    values = [
+    return _diag_candidate_tsv_row_impl(
         column,
-        cand.get("box", ""),
-        f"{float(cand.get('confidence', 0.0)):.4f}" if cand.get("confidence") is not None else "",
-        cand.get("text", ""),
-        status,
-        cand.get("score", ""),
-        cand.get("normalized_headword", ""),
-        cand.get("raw_headword", ""),
-        cand.get("corrected_headword", ""),
-        cand.get("pos_cue", ""),
-        ";".join(str(x) for x in cand.get("ocr_repairs", []) or []),
-        ";".join(reason_parts),
-    ]
-    return "\t".join(_tsv_clean(v) for v in values)
+        cand,
+        raw_status=raw_status,
+        engine=engine,
+        extra_reason=extra_reason,
+        clean=_tsv_clean,
+        reason_builder=_candidate_reason,
+    )
 
 
 _DIAGNOSTIC_HEADER = "column\tbox_band_xyxy\tconf\ttext\taccept/reject\tscore\tlemma\traw\tcorrected\tPOS\trepairs\treason"
@@ -7620,100 +7416,21 @@ _COMPARISON_HEADER = (
 
 
 def _diagnostic_text(report_columns: list[dict[str, Any]]) -> str:
-    """Return a strict rectangular 12-column TSV diagnostics table.
-
-    There are no section-title lines, repeated headers, or blank separator
-    lines. This lets strict TSV editors/importers open the file directly.
-    Paddle/Tesseract provenance is stored in ``reason`` as ``engine=...``.
-    The wider Y-paired table is written separately by ``_comparison_text``.
-    """
-    rows: list[str] = [_DIAGNOSTIC_HEADER]
-    for col in report_columns:
-        n = int(col.get("column", 0)) + 1
-
-        for rec in col.get("ocr_records", []):
-            raw = {
-                "box": rec.get("box"),
-                "confidence": rec.get("confidence"),
-                "text": rec.get("text", ""),
-            }
-            rows.append(_candidate_tsv_row(n, raw, raw_status="raw", engine="PADDLE"))
-        for cand in _candidate_rows(col.get("candidates", [])):
-            rows.append(_candidate_tsv_row(n, cand, engine="PADDLE"))
-
-        tess = col.get("tesseract", {}) or {}
-        if tess.get("error"):
-            rows.append(_candidate_tsv_row(
-                n,
-                {"text": ""},
-                raw_status="error",
-                engine="TESSERACT",
-                extra_reason="error=" + _tsv_clean(tess.get("error")),
-            ))
-        else:
-            for rec in tess.get("records", []):
-                raw = {
-                    "box": rec.get("box"),
-                    "confidence": rec.get("confidence"),
-                    "text": rec.get("text", ""),
-                }
-                rows.append(_candidate_tsv_row(n, raw, raw_status="raw", engine="TESSERACT"))
-        for cand in _candidate_rows(tess.get("candidates", [])):
-            rows.append(_candidate_tsv_row(n, cand, engine="TESSERACT"))
-
-        lens = col.get("lens", {}) or {}
-        if lens.get("error"):
-            rows.append(_candidate_tsv_row(
-                n, {"text": ""}, raw_status="error", engine="GOOGLE_LENS",
-                extra_reason="error=" + _tsv_clean(lens.get("error")),
-            ))
-        else:
-            for rec in lens.get("records", []):
-                raw = {"box": rec.get("box"), "confidence": rec.get("confidence"), "text": rec.get("text", "")}
-                rows.append(_candidate_tsv_row(n, raw, raw_status="raw", engine="GOOGLE_LENS"))
-        for cand in _candidate_rows(lens.get("candidates", [])):
-            rows.append(_candidate_tsv_row(n, cand, engine="GOOGLE_LENS"))
-
-        for item in col.get("tesseract_rescued", []) or []:
-            if isinstance(item, dict):
-                rescue = {
-                    "box": item.get("box", ""),
-                    "confidence": item.get("confidence"),
-                    "text": item.get("word", ""),
-                    "score": item.get("score", ""),
-                    "normalized_headword": item.get("word", ""),
-                    "raw_headword": item.get("raw_headword", ""),
-                    "corrected_headword": item.get("corrected_headword", ""),
-                    "pos_cue": item.get("pos_cue", ""),
-                    "ocr_repairs": item.get("ocr_repairs", []),
-                }
-            else:
-                rescue = {"text": str(item)}
-            rows.append(_candidate_tsv_row(n, rescue, raw_status="rescued", engine="TESSERACT"))
-
-    return "\n".join(rows) + "\n"
+    return _diag_diagnostic_text_impl(
+        report_columns,
+        header=_DIAGNOSTIC_HEADER,
+        candidate_rows=_candidate_rows,
+        candidate_row=_candidate_tsv_row,
+        clean=_tsv_clean,
+    )
 
 
 def _comparison_text(report_columns: list[dict[str, Any]]) -> str:
-    """Return a strict rectangular 27-column Y-paired OCR comparison TSV."""
-    rows: list[str] = [_COMPARISON_HEADER]
-    for col in report_columns:
-        n = int(col.get("column", 0)) + 1
-        for pair in col.get("ocr_y_comparison", []) or []:
-            values = [
-                n,
-                pair.get("paddle_source_y"), pair.get("paddle_box"), pair.get("paddle_conf"),
-                "accept" if pair.get("paddle_accepted") is True else ("reject" if pair.get("paddle_accepted") is False else ""),
-                pair.get("paddle_score"), pair.get("paddle_lemma"), pair.get("paddle_raw"),
-                pair.get("paddle_corrected"), pair.get("paddle_pos"), pair.get("paddle_repairs"), pair.get("paddle_text"),
-                pair.get("tesseract_source_y"), pair.get("tesseract_box"), pair.get("tesseract_conf"),
-                "accept" if pair.get("tesseract_accepted") is True else ("reject" if pair.get("tesseract_accepted") is False else ""),
-                pair.get("tesseract_score"), pair.get("tesseract_lemma"), pair.get("tesseract_raw"),
-                pair.get("tesseract_corrected"), pair.get("tesseract_pos"), pair.get("tesseract_repairs"), pair.get("tesseract_text"),
-                pair.get("delta_y"), pair.get("lemma_compare"), pair.get("status_compare"), pair.get("reason"),
-            ]
-            rows.append("\t".join(_tsv_clean(v) for v in values))
-    return "\n".join(rows) + "\n"
+    return _diag_comparison_text_impl(
+        report_columns,
+        header=_COMPARISON_HEADER,
+        clean=_tsv_clean,
+    )
 
 
 _ENGINES_LONG_HEADER = (
@@ -7722,24 +7439,11 @@ _ENGINES_LONG_HEADER = (
 
 
 def _engines_long_text(report_columns: list[dict[str, Any]]) -> str:
-    """Engine-normalized long table; adding another OCR never changes its schema."""
-    rows = [_ENGINES_LONG_HEADER]
-    for col in report_columns:
-        column = int(col.get("column", 0)) + 1
-        for candidate in col.get("review_candidates", []) or []:
-            pair_id = candidate.get("candidate_id", "")
-            for engine in ("paddle", "tesseract", "lens"):
-                side = candidate.get(engine, {}) or {}
-                if side.get("y") is None:
-                    continue
-                values = [
-                    pair_id, column, side.get("source_y"), engine, side.get("confidence"),
-                    side.get("text", ""), side.get("lemma", ""), side.get("POS", ""),
-                    side.get("score", ""), side.get("repairs", []), side.get("parser_trace", []),
-                    "1" if side.get("accepted") else "0", side.get("reason", ""),
-                ]
-                rows.append("\t".join(_tsv_clean(value) for value in values))
-    return "\n".join(rows) + "\n"
+    return _diag_engines_long_text_impl(
+        report_columns,
+        header=_ENGINES_LONG_HEADER,
+        clean=_tsv_clean,
+    )
 
 
 _FUSION_HEADER = (
@@ -7749,19 +7453,11 @@ _FUSION_HEADER = (
 
 
 def _fusion_text(review_candidates: list[dict[str, Any]]) -> str:
-    rows = [_FUSION_HEADER]
-    for item in review_candidates:
-        engines = [engine for engine in ("paddle", "tesseract", "lens") if (item.get(engine, {}) or {}).get("y") is not None]
-        values = [
-            item.get("candidate_id", ""), int(item.get("column", 0)) + 1, item.get("source_y", ""),
-            ",".join(engines), "1" if item.get("selected") else "0", item.get("word", ""),
-            item.get("final_engine", ""), item.get("confidence", ""), item.get("score", ""),
-            "1" if item.get("needs_review") else "0", item.get("issue_types", []),
-            item.get("decision_reason", ""),
-        ]
-        rows.append("\t".join(_tsv_clean(value) for value in values))
-    return "\n".join(rows) + "\n"
-
+    return _diag_fusion_text_impl(
+        review_candidates,
+        header=_FUSION_HEADER,
+        clean=_tsv_clean,
+    )
 
 
 _ISSUES_HEADER = (
@@ -7777,22 +7473,11 @@ _QUALITY_HEADER = (
 
 
 def _issues_text(review_candidates: list[dict[str, Any]]) -> str:
-    rows = [_ISSUES_HEADER]
-    for item in review_candidates:
-        issues = list(item.get("issue_types", []) or [])
-        if not issues:
-            continue
-        p = item.get("paddle", {}) or {}; t = item.get("tesseract", {}) or {}; lens = item.get("lens", {}) or {}
-        values = [
-            item.get("candidate_id"), int(item.get("column", 0)) + 1, item.get("source_y"),
-            "1" if item.get("selected") else "0", item.get("word"), item.get("final_engine"),
-            item.get("confidence"), item.get("score"), ",".join(issues),
-            p.get("lemma"), t.get("lemma"), lens.get("lemma"),
-            p.get("text"), t.get("text"), lens.get("text"), item.get("decision_reason"),
-        ]
-        rows.append("\t".join(_tsv_clean(v) for v in values))
-    return "\n".join(rows) + "\n"
-
+    return _diag_issues_text_impl(
+        review_candidates,
+        header=_ISSUES_HEADER,
+        clean=_tsv_clean,
+    )
 
 def _manual_selection_path(cache_path: Path) -> Path:
     return cache_path.with_name(f"{cache_path.stem}_manual_selection.json")
@@ -8351,19 +8036,10 @@ def detect_paddle_headwords(
     engine: Any | None = None,
     filter_rules_path: Path | None = None,
     page_sections: list[PageSection] | None = None,
+    record_filter: Any | None = None,
 ) -> list[Entry]:
-    """v2.1 multi-OCR dictionary headword pipeline.
-
-    Pipeline:
-      Paddle/Tesseract/Google Lens -> normalized OCR lines -> dictionary profile ->
-      structured grammar parser -> sequence+Y alignment -> arbitration ->
-      alphabetical sanity warning ->
-      manual selection overrides -> final entries / issues / quality report.
-
-    Raw Paddle boxes remain cacheable independently of parser settings. Tesseract
-    failures never abort the primary Paddle pass; arbitration falls back to the
-    Paddle candidate sequence when the secondary engine is unavailable.
-    """
+    """Run the mature multi-OCR dictionary headword pipeline."""
+    filter_records = record_filter or filter_headword_records
     signature = _cache_signature(image, geometry, settings)
     runtime_width = geometry.transform.canonical_size(image.size)[0]
     pixel_scale = 1.0
@@ -8476,7 +8152,7 @@ def detect_paddle_headwords(
 
         paddle_lines = _records_as_merged_lines(records, settings)
         paddle_full_text = "\n".join(line.text for line in paddle_lines)
-        paddle_entries, diagnostics = filter_headword_records(
+        paddle_entries, diagnostics = filter_records(
             records, analysis_band, source_top, canonical_u, settings,
             separator_band=analysis_separator_band, user_rules=user_rules, engine_name="paddle", profile=profile,
             pixel_scale=pixel_scale,
@@ -8521,7 +8197,7 @@ def detect_paddle_headwords(
                     candidate_records = _records_to_canonical_band(
                         source_candidate_records, band.size, transform_kind
                     )
-                    candidate_entries, candidate_diagnostics = filter_headword_records(
+                    candidate_entries, candidate_diagnostics = filter_records(
                         candidate_records, analysis_band, source_top, canonical_u, settings,
                         separator_band=analysis_separator_band, user_rules=user_rules,
                         engine_name="tesseract", profile=profile,
@@ -8605,7 +8281,7 @@ def detect_paddle_headwords(
                 lens_records = _records_to_canonical_band(
                     source_lens_records, band.size, transform_kind
                 )
-                lens_entries, lens_diagnostics = filter_headword_records(
+                lens_entries, lens_diagnostics = filter_records(
                     lens_records, analysis_band, source_top, canonical_u, settings,
                     separator_band=analysis_separator_band, user_rules=user_rules,
                     engine_name="lens", profile=profile,

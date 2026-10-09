@@ -15,12 +15,11 @@ fusion behavior.
 from dataclasses import replace
 from pathlib import Path
 import json
-import sys
-import types
 from typing import Any
 
 from PIL import Image
 
+from .facade_compat import install_core_assignment_mirror, publish_core_namespace
 from .image_utils import build_analysis_image
 from .models import AppSettings, Entry
 from .page_sections import PageSection
@@ -36,9 +35,7 @@ from .separator_y_refinement import refined_layout_entry_y_by_line
 from .training_baseline import save_automatic_baseline
 
 
-for _name, _value in vars(_core).items():
-    if not _name.startswith("__"):
-        globals()[_name] = _value
+publish_core_namespace(globals(), _core)
 
 
 _original_detect_entries_left_edge = _core._detect_entries_left_edge
@@ -49,18 +46,16 @@ _page_template_image = _core.page_template_analysis_image
 
 
 def _ensure_layout_runtime() -> None:
-    """Install the single physical-indent Layout runtime in this process.
+    """Install the remaining physical-indent Layout runtime in this process.
 
-    GUI and Windows/macOS spawn workers import modules independently.  Runtime
-    preparation therefore belongs in the detection facade itself rather than in
-    launcher-only monkey patches.  All installers are idempotent.
+    GUI and Windows/macOS spawn workers import modules independently. Runtime
+    preparation therefore belongs in the detection facade itself. The public
+    Page Design detector now forwards to the refined implementation statically;
+    only the two lower-level idempotent installers remain here.
     """
-    from . import dictionary_page_design
-    from .dictionary_page_design_refined import detect_entries_from_page_design
     from .layout_line_start_refinement import install_robust_line_starts
     from .layout_physical_indent import install_physical_indent_inference
 
-    dictionary_page_design.detect_entries_from_page_design = detect_entries_from_page_design
     install_robust_line_starts()
     install_physical_indent_inference()
 
@@ -73,31 +68,60 @@ def _understand_page_current(
     page_sections: list[PageSection] | None,
     layout_only: bool = False,
 ) -> PageUnderstanding | None:
-    """Resolve the live Page Understanding implementation after runtime setup.
+    """Resolve Page Understanding with optional static illustration masking."""
+    analysis_image = image
+    mask_stats = None
+    append_reason = None
+    if bool(getattr(settings, "layout_mask_illustrations", False)):
+        from .layout_illustration_mask import (
+            IllustrationMaskStats,
+            append_mask_reason,
+            mask_large_illustrations_for_layout,
+        )
 
-    ``layout_only`` skips semantic enrichment, symbol evidence and OCR-adjacent
-    work.  It is the authoritative fast path for 【显示Layout】 and 【普通画线】.
-    """
+        mask_stats = IllustrationMaskStats()
+        append_reason = append_mask_reason
+        try:
+            analysis_image, mask_stats = mask_large_illustrations_for_layout(
+                image,
+                settings,
+                profile_page_index=int(page_index),
+            )
+        except Exception:
+            analysis_image = image
+            mask_stats = IllustrationMaskStats()
+
     try:
         _ensure_layout_runtime()
         if layout_only:
             from .layout_core_understanding import understand_layout_core
 
-            return understand_layout_core(
-                image,
+            understanding = understand_layout_core(
+                analysis_image,
                 settings,
                 page_index=page_index,
             )
+        else:
+            from . import page_understanding as page_understanding_module
 
-        from . import page_understanding as page_understanding_module
-        return page_understanding_module.understand_page(
-            image,
-            settings,
-            page_index=page_index,
-            page_sections=page_sections,
-        )
+            understanding = page_understanding_module.understand_page(
+                analysis_image,
+                settings,
+                page_index=page_index,
+                page_sections=page_sections,
+            )
+        if append_reason is not None and mask_stats is not None:
+            append_reason(understanding, mask_stats)
+        return understanding
     except Exception:
         return None
+    finally:
+        if analysis_image is not image:
+            try:
+                analysis_image.close()
+            except Exception:
+                pass
+
 
 
 def _uses_cjk_indent_topology(settings: AppSettings) -> bool:
@@ -230,14 +254,16 @@ def _allowed_entries(
     profile_page_index: int,
     page_sections: list[PageSection] | None,
 ) -> list[Entry]:
-    source = _core.normalize_page_rgb(image)
+    # All private call sites pass detect_entries()' already-normalized source.
+    # This filter only needs page size, so a second full-page RGB copy is waste.
+    source_size = tuple(image.size)
     effective = _core.effective_page_settings(
-        settings, source.size, profile_page_index,
+        settings, source_size, profile_page_index,
     )
     return [
         entry for entry in entries
         if _core.entry_allowed_by_page_template(
-            entry.x, entry.y, source.size, effective, profile_page_index,
+            entry.x, entry.y, source_size, effective, profile_page_index,
         )
         and (
             not page_sections
@@ -249,13 +275,16 @@ def _allowed_entries(
     ]
 
 
+
 def _ordinary_entries_from_layout_roles(
     understanding: PageUnderstanding,
     image: Image.Image | None = None,
     *,
     page_index: int = 0,
 ) -> list[Entry]:
-    """Materialize final Layout entry rows, refining only their separator Y."""
+    """Materialize final Layout entry rows with canonical classification."""
+    from .entry_classification import copy_layout_line_classification
+
     layout = understanding.layout
     refined_y_by_line = (
         refined_layout_entry_y_by_line(
@@ -280,14 +309,24 @@ def _ordinary_entries_from_layout_roles(
                 canonical_y,
                 layout.source_size,
             )
-            result.append(Entry(
+            entry = Entry(
                 word="",
                 x=int(source_x),
                 y=int(source_y),
                 confidence=None,
                 ocr_source="page_understanding:ordinary_layout_role",
                 issue_type="PAGE_UNDERSTANDING_ORDINARY_LAYOUT_ROLE",
-            ))
+            )
+            meta = copy_layout_line_classification(line, entry)
+            if meta.entry_scale == "oversized":
+                entry.ocr_oversized_cjk = True
+                entry.ocr_single_cjk = True
+                if meta.detected_head_height > 0:
+                    entry.ocr_visual_run_height = float(meta.detected_head_height)
+                    entry.ocr_line_height_reference = float(
+                        getattr(layout, "ordinary_line_height", 0.0) or 0.0
+                    )
+            result.append(entry)
     return result
 
 
@@ -492,6 +531,7 @@ def detect_entries(
             paddle_filter_rules_path=paddle_filter_rules_path,
             profile_page_index=profile_page_index,
             page_sections=page_sections,
+            left_edge_detector=_detect_entries_left_edge,
         )
 
     entries, shared_geometry, review_candidates = _shared_detector_observations(
@@ -533,26 +573,44 @@ def detect_entries_job(
     pages: tuple[str, str, str],
     profile_page_index: int = 0,
 ) -> int:
-    """Spawn-safe worker using the same canonical ``detect_entries`` path."""
+    """Run one ordinary-drawing job through the explicit worker bootstrap."""
+    from .bootstrap.worker import build_worker_services
+
+    services = build_worker_services()
+    formats = services.formats
+    processing_module = services.processing
+
     page = Path(image_path)
     with Image.open(page) as opened:
-        image = _core.normalize_page_rgb(opened)
-    settings.detection_method = "left_edge"
-    entries, _geometry = detect_entries(
-        image,
-        settings,
-        profile_page_index=profile_page_index,
-        page_sections=_core.read_page_sections(page),
-    )
-    pdic = _core.pdic_path_for_image(page)
-    save_automatic_baseline(pdic, entries, image.width, pages)
-    _core.write_pdic(
-        pdic,
-        entries,
-        image.width,
-        pages,
-    )
-    return len(entries)
+        image = processing_module._core.normalize_page_rgb(opened)
+
+    try:
+        current = replace(settings)
+        current.detection_method = "left_edge"
+        with services.capture_layout_rows(
+            page.parent,
+            page,
+            int(profile_page_index),
+            settings,
+        ):
+            entries, _geometry = processing_module.detect_entries(
+                image,
+                current,
+                profile_page_index=profile_page_index,
+                page_sections=processing_module._core.read_page_sections(page),
+            )
+
+        pdic = processing_module._core.pdic_path_for_image(page)
+        services.save_automatic_baseline(pdic, entries, image.width, pages)
+        formats.write_pdic(
+            pdic,
+            entries,
+            image.width,
+            pages,
+        )
+        return len(entries)
+    finally:
+        image.close()
 
 
 def _publish_file_transaction(*args, **kwargs):
@@ -563,7 +621,7 @@ def _stage_page_crop_plan(*args, **kwargs):
     return _core._stage_page_crop_plan(*args, **kwargs)
 
 
-# Historical publish implementation uses uuid.uuid4().hex in processing_core.
+# Publish transaction ownership uses uuid.uuid4().hex in processing_publish.
 
 
 def split_single_lines(*args, **kwargs):
@@ -605,22 +663,12 @@ def append_illustration_crop_log(*args, **kwargs):
     return _core.append_illustration_crop_log(*args, **kwargs)
 
 
-_core._detect_entries_left_edge = _detect_entries_left_edge
 globals()["_detect_entries_left_edge"] = _detect_entries_left_edge
 globals()["detect_entries"] = detect_entries
 globals()["detect_entries_job"] = detect_entries_job
 
 
-class _CoreProxyModule(types.ModuleType):
-    """Mirror monkeypatch/debug assignments from facade to historical core."""
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        types.ModuleType.__setattr__(self, name, value)
-        if name not in {"_core"} and hasattr(_core, name):
-            setattr(_core, name, value)
-
-
-sys.modules[__name__].__class__ = _CoreProxyModule
+install_core_assignment_mirror(__name__, _core)
 
 
 # Source-guard compatibility markers for long-standing regression checks.

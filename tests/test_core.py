@@ -1821,8 +1821,11 @@ def test_v275_main_ocr_button_has_fixed_compact_label():
 
 
 def test_v275_page_switch_saves_current_editing_mode_before_loading_new_page():
-    source = Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "app.py"
-    text = source.read_text(encoding="utf-8")
+    root = Path(__file__).resolve().parents[1]
+    text = (root / "src" / "picture_capture" / "app.py").read_text(encoding="utf-8")
+    controller = (
+        root / "src" / "picture_capture" / "ui" / "controllers" / "page.py"
+    ).read_text(encoding="utf-8")
 
     load_start = text.index("    def load_page(")
     load_end = text.index("    def change_page(", load_start)
@@ -1830,10 +1833,7 @@ def test_v275_page_switch_saves_current_editing_mode_before_loading_new_page():
     assert "self._save_current_page_by_mode()" in load_block
     assert load_block.index("self._save_current_page_by_mode()") < load_block.index("self.current_index = index")
 
-    change_start = load_end
-    change_end = text.index("    def redraw(", change_start)
-    change_block = text[change_start:change_end]
-    assert "self._save_current_page_by_mode()" in change_block
+    assert "app._save_current_page_by_mode()" in controller
 
 
 def test_v2810_save_current_page_is_mode_specific():
@@ -3883,13 +3883,22 @@ def test_v295_right_click_is_next_page_outside_polygon_mode():
 
 
 def test_v295_illustration_crop_button_uses_shared_crop_settings_before_running_batch():
-    source = Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "app.py"
-    text = source.read_text(encoding="utf-8")
-    start = text.index("    def split_illustrations_selected_scope(")
-    end = text.index("    def _start_illustration_crop(", start)
-    block = text[start:end]
-    assert "self._start_illustration_crop(indices, self._load_crop_settings())" in block
-    assert "_start_parallel_batch_task" not in block
+    root = Path(__file__).resolve().parents[1]
+    app_text = (root / "src" / "picture_capture" / "app.py").read_text(encoding="utf-8")
+    controller_text = (
+        root / "src" / "picture_capture" / "ui" / "controllers" / "illustration.py"
+    ).read_text(encoding="utf-8")
+
+    app_start = app_text.index("    def split_illustrations_selected_scope(")
+    app_end = app_text.index("    def _start_illustration_crop(", app_start)
+    app_block = app_text[app_start:app_end]
+    assert "self._illustration_controller_for_call().split_illustrations_selected_scope()" in app_block
+
+    controller_start = controller_text.index("    def split_illustrations_selected_scope(")
+    controller_end = controller_text.index("    def _start_illustration_crop(", controller_start)
+    controller_block = controller_text[controller_start:controller_end]
+    assert "app._start_illustration_crop(indices, app._load_crop_settings())" in controller_block
+    assert "_start_parallel_batch_task" not in controller_block
 
 
 
@@ -3901,7 +3910,12 @@ def test_v296_large_words_page_resolution_uses_one_prebuilt_lookup():
     # Preserve v2.9.5 ambiguity semantics: two suffix matches must not guess.
     assert _resolve_words_page_token("2", stems, lookup) is None
 
-    source = Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "app.py"
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "picture_capture"
+        / "page_word_mapping.py"
+    )
     text = source.read_text(encoding="utf-8")
     start = text.index("def _parse_words_of_pages_text(")
     end = text.index("\n\ndef _fill_page_entries", start)
@@ -3911,39 +3925,58 @@ def test_v296_large_words_page_resolution_uses_one_prebuilt_lookup():
 
 
 def test_v296_existing_word_fill_runs_txt_parse_and_page_commits_in_background_batch():
-    source = Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "app.py"
-    text = source.read_text(encoding="utf-8")
-    start = text.index("    def fill_existing_headwords(self) -> None:")
-    end = text.index("    def import_legacy_words(self) -> bool:", start)
-    block = text[start:end]
+    root = Path(__file__).resolve().parents[1]
+    app_text = (root / "src" / "picture_capture" / "app.py").read_text(encoding="utf-8")
+    app_start = app_text.index("    def fill_existing_headwords(self) -> None:")
+    app_end = app_text.index("    def import_legacy_words(self) -> bool:", app_start)
+    app_block = app_text[app_start:app_end]
+    assert "self._headword_controller_for_call().fill_existing_headwords()" in app_block
+
+    controller_text = (
+        root / "src" / "picture_capture" / "ui" / "controllers" / "headword.py"
+    ).read_text(encoding="utf-8")
+    start = controller_text.index("    def fill_existing_headwords(self) -> None:")
+    block = controller_text[start:]
     # v2.9.8 may reuse an already parsed source; a cache miss is still parsed
     # inside the batch worker call path rather than on Tk's event thread.
     ensure_pos = block.index("        def ensure_mapping(")
     worker_pos = block.index("        def worker(")
     assert block.index("read_text_detected(txt_path)", ensure_pos) < worker_pos
     assert block.index("mapping, present_pages = ensure_mapping()", worker_pos) > worker_pos
-    assert "self._start_batch_task(" in block
+    assert "app._start_batch_task(" in block
     assert '"填充词条"' in block
     assert "item_label=lambda i: pages[i].name" in block
     assert "foreground_page_edit=False" in block
     assert "进度按页面更新，可暂停或停止" in block
 
-
 def test_v298_existing_word_source_selection_is_separate_and_refill_reuses_cache():
-    source = Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "app.py"
-    text = source.read_text(encoding="utf-8")
-    select_start = text.index("    def select_existing_headwords_file(self) -> None:")
-    fill_start = text.index("    def fill_existing_headwords(self) -> None:", select_start)
-    import_start = text.index("    def import_legacy_words(self) -> bool:", fill_start)
-    select_block = text[select_start:fill_start]
-    fill_block = text[fill_start:import_start]
+    root = Path(__file__).resolve().parents[1]
+    app_text = (root / "src" / "picture_capture" / "app.py").read_text(encoding="utf-8")
+    select_start = app_text.index("    def select_existing_headwords_file(self) -> None:")
+    fill_start = app_text.index("    def fill_existing_headwords(self) -> None:", select_start)
+    import_start = app_text.index("    def import_legacy_words(self) -> bool:", fill_start)
+    assert (
+        "self._headword_controller_for_call().select_existing_headwords_file()"
+        in app_text[select_start:fill_start]
+    )
+    assert (
+        "self._headword_controller_for_call().fill_existing_headwords()"
+        in app_text[fill_start:import_start]
+    )
+
+    controller_text = (
+        root / "src" / "picture_capture" / "ui" / "controllers" / "headword.py"
+    ).read_text(encoding="utf-8")
+    select_start = controller_text.index("    def select_existing_headwords_file(self) -> None:")
+    fill_start = controller_text.index("    def fill_existing_headwords(self) -> None:", select_start)
+    select_block = controller_text[select_start:fill_start]
+    fill_block = controller_text[fill_start:]
     assert "filedialog.askopenfilename(" in select_block
     assert "filedialog.askopenfilename(" not in fill_block
-    assert "self._word_fill_source_mapping" in fill_block
-    assert '"value": self._word_fill_source_mapping' in fill_block
-    assert "self._word_fill_source_mapping = mapping" in fill_block
+    assert "app._word_fill_source_mapping" in fill_block
+    assert '"value": app._word_fill_source_mapping' in fill_block
+    assert "app._word_fill_source_mapping = mapping" in fill_block
     assert "请先点击[选择词条文件]" in fill_block
-
 
 def test_v298_action_row_exposes_select_then_fill_buttons():
     source = Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "app.py"
@@ -4439,14 +4472,17 @@ def test_v2101_auto_illustration_detection_writes_ppp_and_preserves_manual(tmp_p
 
 def test_v2101_illustration_detection_button_uses_selected_scope_and_auto_ppp():
     from pathlib import Path
-    text = (Path(__file__).parents[1] / "src" / "picture_capture" / "app.py").read_text(encoding="utf-8")
-    assert '("插图识别", self.detect_illustrations_selected_scope)' in text
-    start = text.index("    def detect_illustrations_selected_scope(")
-    end = text.index("    def split_illustrations_selected_scope(", start)
-    block = text[start:end]
-    assert "selected_page_indices()" in block
-    assert "人工绘制的 PPP 多边形会保留" in block
-    assert "foreground_page_edit=True" in block
+    root = Path(__file__).parents[1]
+    app = (root / "src" / "picture_capture" / "app.py").read_text(encoding="utf-8")
+    controller = (root / "src" / "picture_capture" / "ui" / "controllers" / "illustration.py").read_text(encoding="utf-8")
+    assert '("插图识别", self.detect_illustrations_selected_scope)' in app
+    start = app.index("    def detect_illustrations_selected_scope(")
+    end = app.index("    def split_illustrations_selected_scope(", start)
+    wrapper = app[start:end]
+    assert "self._illustration_controller_for_call().detect_illustrations_selected_scope()" in wrapper
+    assert "selected_page_indices()" in controller
+    assert "人工绘制的 PPP 多边形会保留" in controller
+    assert "foreground_page_edit=True" in controller
 
 
 def test_v2102_wordslist_path_default_and_project_relative_load(tmp_path):
@@ -4680,15 +4716,23 @@ def test_v2116_page_illustration_count_uses_ppp_without_opening_page_pixels(tmp_
 def test_main_crop_preview_is_selected_only_through_display_mode():
     source = Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "app.py"
     text = source.read_text(encoding="utf-8")
+    controller_text = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "picture_capture" / "ui" / "controllers" / "canvas.py"
+    ).read_text(encoding="utf-8")
     assert 'text="显示切图预览"' not in text
     assert 'values=("原图+标注", "二值+标注", "仅原图", "仅二值", "切图预览")' in text
-    assert '"切图预览": (False, False, True)' in text
+    assert '"切图预览": (False, False, True)' in controller_text
     assert 'def _draw_crop_plan_preview' in text
 
 
 def test_display_mode_and_color_mode_live_at_bottom_of_auxiliary_options():
     source = Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "app.py"
     text = source.read_text(encoding="utf-8")
+    controller_text = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "picture_capture" / "ui" / "controllers" / "canvas.py"
+    ).read_text(encoding="utf-8")
     assert 'text="显示模式："' in text
     assert 'values=("原图+标注", "二值+标注", "仅原图", "仅二值", "切图预览")' in text
     assert 'display_mode_combo.bind("<<ComboboxSelected>>", self._apply_display_mode)' in text
@@ -4698,7 +4742,7 @@ def test_display_mode_and_color_mode_live_at_bottom_of_auxiliary_options():
     assert 'text="显示模式："' not in page_toolbar
 
     aux_start = text.index('self._section_frame(parent, "二、显示设置"')
-    aux_end = text.index('ocr = self._section_frame(parent, "三、融合 / OCR画线参数"', aux_start)
+    aux_end = text.index('ocr = self._section_frame(parent, "三、共享 OCR 通道 / OCR画线"', aux_start)
     aux = text[aux_start:aux_end]
     assert 'display_mode_combo = ttk.Combobox(\n            option_row,' in aux
     assert 'text="颜色模式："' in aux
@@ -4708,11 +4752,11 @@ def test_display_mode_and_color_mode_live_at_bottom_of_auxiliary_options():
     assert aux.index('text="隐藏线框(插图除外)"') < aux.index('text="显示模式："')
     assert aux.index('text="显示模式："') < aux.index('text="颜色模式："')
     assert 'text="◧"' not in text
-    assert '"原图+标注": (False, False, False)' in text
-    assert '"二值+标注": (True, False, False)' in text
-    assert '"仅原图": (False, True, False)' in text
-    assert '"仅二值": (True, True, False)' in text
-    assert '"切图预览": (False, False, True)' in text
+    assert '"原图+标注": (False, False, False)' in controller_text
+    assert '"二值+标注": (True, False, False)' in controller_text
+    assert '"仅原图": (False, True, False)' in controller_text
+    assert '"仅二值": (True, True, False)' in controller_text
+    assert '"切图预览": (False, False, True)' in controller_text
 
 
 def test_page_list_compact_labels_navigation_order_and_consistency_minimum():
@@ -4991,10 +5035,16 @@ def test_v2114_repair_sort_uses_column_then_y_and_never_x():
 
 
 def test_v2114_repair_pdic_button_calls_column_y_sort_only():
-    app_text = (Path(__file__).parents[1] / "src" / "picture_capture" / "app.py").read_text(encoding="utf-8")
-    start = app_text.index("def repair_pdic_order_selected_scope")
-    end = app_text.index("def backup_pdic", start)
-    body = app_text[start:end]
+    root = Path(__file__).parents[1] / "src" / "picture_capture"
+    app_text = (root / "app.py").read_text(encoding="utf-8")
+    controller_text = (root / "ui" / "controllers" / "export.py").read_text(encoding="utf-8")
+    app_start = app_text.index("    def repair_pdic_order_selected_scope")
+    app_end = app_text.index("    def export_picdic_index", app_start)
+    wrapper = app_text[app_start:app_end]
+    start = controller_text.index("    def repair_pdic_order_selected_scope")
+    end = controller_text.index("    def export_picdic_index", start)
+    body = controller_text[start:end]
+    assert "self._export_controller_for_call().repair_pdic_order_selected_scope()" in wrapper
     assert "sort_entries_column_y(" in body
     assert "read_page_sections(page)" in body
     assert "栏号 → Y" in body
@@ -5018,30 +5068,39 @@ def test_v2115_nominal_geometry_matches_full_geometry_column_intervals():
 
 
 def test_v2115_large_existing_word_fill_avoids_full_image_decode_and_bulk_tree_updates():
-    app_text = (Path(__file__).parents[1] / "src" / "picture_capture" / "app.py").read_text(encoding="utf-8")
+    root = Path(__file__).parents[1]
+    app_text = (root / "src" / "picture_capture" / "app.py").read_text(encoding="utf-8")
     start = app_text.index("    def fill_existing_headwords(self) -> None:")
     end = app_text.index("    def import_legacy_words(self) -> bool:", start)
-    body = app_text[start:end]
-    assert "settings_snapshot = replace(self.settings)" in body
+    assert "self._headword_controller_for_call().fill_existing_headwords()" in app_text[start:end]
+
+    controller_text = (
+        root / "src" / "picture_capture" / "ui" / "controllers" / "headword.py"
+    ).read_text(encoding="utf-8")
+    start = controller_text.index("    def fill_existing_headwords(self) -> None:")
+    body = controller_text[start:]
+    assert "settings_snapshot = replace(app.settings)" in body
     assert "derive_nominal_geometry(width, height, settings_snapshot)" in body
-    assert "derive_nominal_geometry(width, height, self.settings)" not in body
+    assert "derive_nominal_geometry(width, height, app.settings)" not in body
     assert "page_image = normalize_page_rgb(opened)" not in body
     assert "refresh_row=False" in body
 
-
 def test_v2115_pdic_repair_and_restore_use_header_only_geometry():
-    app_text = (Path(__file__).parents[1] / "src" / "picture_capture" / "app.py").read_text(encoding="utf-8")
-    repair_start = app_text.index("    def repair_pdic_order_selected_scope")
-    repair_end = app_text.index("    def backup_pdic", repair_start)
-    repair = app_text[repair_start:repair_end]
+    controller_text = (
+        Path(__file__).parents[1]
+        / "src" / "picture_capture" / "ui" / "controllers" / "export.py"
+    ).read_text(encoding="utf-8")
+    repair_start = controller_text.index("    def repair_pdic_order_selected_scope")
+    repair_end = controller_text.index("    def export_picdic_index", repair_start)
+    repair = controller_text[repair_start:repair_end]
+    assert "settings = app.settings" in repair
     assert "derive_nominal_geometry(width, height, settings)" in repair
     assert "normalize_page_rgb(opened)" not in repair
-    restore_start = app_text.index("    def restore_from_pdic_backup")
-    restore_end = app_text.index("    def restore_from_merged_pdic", restore_start)
-    restore = app_text[restore_start:restore_end]
-    assert "settings_snapshot = replace(self.settings)" in restore
+    restore_start = controller_text.index("    def restore_from_pdic_backup")
+    restore = controller_text[restore_start:]
+    assert "settings_snapshot = replace(app.settings)" in restore
     assert "derive_nominal_geometry(width, height, settings_snapshot)" in restore
-    assert "derive_nominal_geometry(width, height, self.settings)" not in restore
+    assert "derive_nominal_geometry(width, height, app.settings)" not in restore
     assert "normalize_page_rgb(opened)" not in restore
 
 
@@ -5205,12 +5264,23 @@ def test_crop_settings_v7_declares_source_coordinate_space():
     assert '"paddle_separator_safety_px": "原图px"' in schema
 
 
-def test_v21110_backup_pdic_is_background_and_streaming():
-    app_text = (Path(__file__).parents[1] / "src" / "picture_capture" / "app.py").read_text(encoding="utf-8")
+def _phase4r_backup_source_blocks():
+    root = Path(__file__).parents[1] / "src" / "picture_capture"
+    app_text = (root / "app.py").read_text(encoding="utf-8")
+    controller_text = (root / "ui" / "controllers" / "export.py").read_text(encoding="utf-8")
     start = app_text.index("    def backup_pdic(self) -> None:")
     end = app_text.index("    def restore_from_pdic_backup", start)
-    body = app_text[start:end]
-    assert 'self._start_batch_task(' in body
+    wrapper = app_text[start:end]
+    start = controller_text.index("    def backup_pdic(self) -> None:")
+    end = controller_text.index("    def restore_from_pdic_backup(self) -> None:", start)
+    body = controller_text[start:end]
+    return app_text, wrapper, body
+
+
+def test_v21110_backup_pdic_is_background_and_streaming():
+    _app_text, wrapper, body = _phase4r_backup_source_blocks()
+    assert "self._export_controller_for_call().backup_pdic()" in wrapper
+    assert 'app._start_batch_task(' in body
     assert 'temp.open("w", encoding="utf-8", newline="\\n")' in body
     assert 'source.read_text(encoding="utf-8-sig").splitlines()' in body
     assert 'stream.write("\\n".join(page_lines))' in body
@@ -5220,20 +5290,14 @@ def test_v21110_backup_pdic_is_background_and_streaming():
 
 
 def test_v21110_backup_pdic_does_not_touch_page_images():
-    app_text = (Path(__file__).parents[1] / "src" / "picture_capture" / "app.py").read_text(encoding="utf-8")
-    start = app_text.index("    def backup_pdic(self) -> None:")
-    end = app_text.index("    def restore_from_pdic_backup", start)
-    body = app_text[start:end]
+    _app_text, _wrapper, body = _phase4r_backup_source_blocks()
     assert "normalize_page_rgb" not in body
     assert "Image.open" not in body
     assert "derive_geometry" not in body
 
 
 def test_v21110_backup_skips_unrelated_full_page_metadata_refresh():
-    app_text = (Path(__file__).parents[1] / "src" / "picture_capture" / "app.py").read_text(encoding="utf-8")
-    start = app_text.index("    def backup_pdic(self) -> None:")
-    end = app_text.index("    def restore_from_pdic_backup", start)
-    body = app_text[start:end]
+    app_text, _wrapper, body = _phase4r_backup_source_blocks()
     assert "refresh_page_quality=False" in body
     finish_start = app_text.index("    def _finish_batch_task")
     finish_end = app_text.index("    def _hide_batch_bar_if_idle", finish_start)
@@ -5249,14 +5313,21 @@ def test_v21111_illustration_button_is_renamed_to_edit_only():
 
 
 def test_v21111_picdic_index_export_is_background_streaming_and_exact_format():
-    app_text = (Path(__file__).parents[1] / "src" / "picture_capture" / "app.py").read_text(encoding="utf-8")
+    root = Path(__file__).parents[1] / "src" / "picture_capture"
+    app_text = (root / "app.py").read_text(encoding="utf-8")
+    controller_text = (root / "ui" / "controllers" / "export.py").read_text(encoding="utf-8")
     start = app_text.index("    def export_picdic_index(self) -> None:")
     end = app_text.index("    def backup_pdic", start)
-    body = app_text[start:end]
+    wrapper = app_text[start:end]
+    start = controller_text.index("    def export_picdic_index(self) -> None:")
+    end = controller_text.index("    def backup_pdic(self) -> None:", start)
+    body = controller_text[start:end]
     assert '("导出PicDic索引", self.export_picdic_index)' in app_text
-    assert 'read_picdic_index_records(pdic_path(page), fallback_page=page.stem)' in body
+    assert "self._export_controller_for_call().export_picdic_index()" in wrapper
+    assert 'read_picdic_index_records(' in body
+    assert 'pdic_path(page), fallback_page=page.stem' in body
     assert 'stream.write("\\n".join(records))' in body
-    assert 'self._start_batch_task(' in body
+    assert 'app._start_batch_task(' in body
     assert 'refresh_page_quality=False' in body
     assert 'Image.open' not in body
     assert 'derive_geometry' not in body
@@ -5358,7 +5429,12 @@ def test_sidebar_defaults_fold_sections_two_through_five_and_keep_project_detail
     assert 'parent, "五、后期词典制作", padding=5, section_key="postproduction"' in app_text
     assert '"四、画线 / OCR / 插图 / 校对"' in app_text
     assert 'self._section_frame(sidebar, "六、页面列表"' in app_text
-    first_row = '(("词条切图", self.split_entries_selected_scope), ("插图切图", self.split_illustrations_selected_scope))'
+    first_row = (
+        '(("单行切图", self.split_single_lines_selected_scope), '
+        '("未画线行导出", self.export_unlined_rows_selected_scope), '
+        '("词条切图", self.split_entries_selected_scope), '
+        '("插图切图", self.split_illustrations_selected_scope))'
+    )
     second_row = '(("项目详情", self.open_project_details), ("导出PicDic索引", self.export_picdic_index), ("PicDic制作", self.build_picdic))'
     final_row = '(("导出训练标记包", self.export_training_package),)'
     assert first_row in app_text
@@ -5842,7 +5918,7 @@ def test_review_screenshot_polish_prevents_right_pane_clipping():
     build = review[build_start:build_end]
     assert "def add_review_height_control(" in build
     assert '"普通词条行切图高："' in build
-    assert '"单字行高："' in build
+    assert '"大字头切图高："' in build
     height_controls = build[
         build.index("        def add_review_height_control("):
         build.index("        zoom_row = ttk.Frame(")
@@ -6016,7 +6092,7 @@ def test_v21119_review_ui_exposes_text_left_padding_and_live_ocr_similarity():
     assert 'editor.pack_configure(padx=(padding, 0))' in review
 
 
-def test_v21120_review_single_cjk_crop_expands_but_normal_word_does_not():
+def test_review_oversized_classification_crop_expands_but_regular_does_not():
     from picture_capture.app import _review_line_box
 
     image = Image.new("RGB", (1000, 1400), "white")
@@ -6026,16 +6102,24 @@ def test_v21120_review_single_cjk_crop_expands_but_normal_word_does_not():
     )
     geometry = Geometry([100], [600], 50, 1300, [ColumnPath([(50, 100), (1300, 100)])])
 
-    single = Entry("字", 110, 100)
-    normal = Entry("字典", 110, 100)
-    single_box = _review_line_box(single, geometry, image, settings)
-    normal_box = _review_line_box(normal, geometry, image, settings)
+    oversized = Entry(
+        "字", 110, 100,
+        ocr_source="ordinary_large_head_evidence",
+        ocr_visual_run_height=100.0,
+        ocr_oversized_cjk=True,
+    )
+    regular = Entry(
+        "字典", 110, 100,
+        ocr_source="ordinary_symbol_evidence",
+    )
+    oversized_box = _review_line_box(oversized, geometry, image, settings)
+    regular_box = _review_line_box(regular, geometry, image, settings)
 
-    assert normal_box[1] == normal.y - round(0.5 * settings.row_padding)
-    assert single_box[3] > normal_box[3]
-    assert single_box[0] == normal_box[0]
-    assert single_box[2] == normal_box[2]
-    assert single_box[3] - single_box[1] == 100 + 2 * settings.row_padding
+    assert regular_box[1] == regular.y - round(0.5 * settings.row_padding)
+    assert oversized_box[3] > regular_box[3]
+    assert oversized_box[0] == regular_box[0]
+    assert oversized_box[2] == regular_box[2]
+    assert oversized_box[3] - oversized_box[1] == 100 + 2 * settings.row_padding
 
 
 def test_review_regular_crop_uses_half_spacing_top_and_full_spacing_height():
@@ -6078,7 +6162,7 @@ def test_sidebar_scroll_review_height_controls_and_normal_process_worker_are_wir
     assert "detect_entries_job" in detect_block
 
 
-def test_v21120_review_single_cjk_crop_no_longer_caps_at_next_marker():
+def test_review_oversized_classification_crop_no_longer_caps_at_next_marker():
     from picture_capture.app import _review_line_box
 
     image = Image.new("RGB", (1000, 1400), "white")
@@ -6088,12 +6172,17 @@ def test_v21120_review_single_cjk_crop_no_longer_caps_at_next_marker():
     )
     geometry = Geometry([100], [600], 50, 1300, [ColumnPath([(50, 100), (1300, 100)])])
 
-    current = Entry("字", 110, 100)
+    current = Entry(
+        "字", 110, 100,
+        ocr_source="ordinary_large_head_evidence",
+        ocr_visual_run_height=100.0,
+        ocr_oversized_cjk=True,
+    )
     next_entry = Entry("下一", 110, 160)
     box = _review_line_box(current, geometry, image, settings, next_entry)
 
-    # Explicit/fixed review height wins even when the next hand-drawn marker is
-    # closer than that height; this prevents inconsistent marker Y from clipping.
+    # Structural oversized crop height wins even when the next hand-drawn marker
+    # is closer; inconsistent marker Y must not clip the display head.
     assert box[3] > next_entry.y
     assert box[3] - box[1] == 100 + 2 * settings.row_padding
 
@@ -6240,16 +6329,16 @@ def test_v21122_hotfix2_review_ui_exposes_shared_and_single_height_plus_main_ocr
     start = text.index("class ReviewWindow")
     end = text.index("class PictureCaptureApp", start)
     review = text[start:end]
-    assert '"单行高："' in review
-    assert '"单字行高："' in review
-    assert '"单行高：", self.review_line_height_var, self.review_line_height_px_var' in review
+    assert '"普通字/行高："' in review
+    assert '"大字头切图高："' in review
+    assert '"普通字/行高：", self.review_line_height_var, self.review_line_height_px_var' in review
     assert '"行间空：",' in review
     assert 'self.review_row_padding_var,' in review
     assert 'self.review_row_padding_px_var,' in review
     assert '"普通词条行切图高：",' in review
     assert 'self.review_regular_crop_height_var,' in review
     assert 'self.review_regular_crop_height_px_var,' in review
-    assert '"单字行高：",' in review
+    assert '"大字头切图高：",' in review
     assert 'self.review_single_cjk_line_height_var,' in review
     assert 'self.review_single_cjk_line_height_px_var,' in review
     height_controls = review[
@@ -7423,7 +7512,7 @@ def test_windows_ocr_installer_uses_thin_batch_and_locked_uv_profiles():
         "ocr-gpu-cu118", "ocr-gpu-cu126", "ocr-gpu-cu129",
     }
 
-    runtime_source = Path("src/picture_capture/windows_gpu_runtime.py").read_text(encoding="utf-8")
+    runtime_source = Path("src/picture_capture/windows_gpu.py").read_text(encoding="utf-8")
     paddle_source = Path("src/picture_capture/paddle_headwords.py").read_text(encoding="utf-8")
     layout_source = Path("src/picture_capture/layout_detection.py").read_text(encoding="utf-8")
     verify_source = Path("scripts/verify_ocr_environment.py").read_text(encoding="utf-8")
@@ -7971,7 +8060,7 @@ def test_main_auxiliary_section_controls_section_overlay_and_ocr_display_order()
     source = Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "app.py"
     text = source.read_text(encoding="utf-8")
     aux_start = text.index('self._section_frame(parent, "二、显示设置"')
-    aux_end = text.index('ocr = self._section_frame(parent, "三、融合 / OCR画线参数"', aux_start)
+    aux_end = text.index('ocr = self._section_frame(parent, "三、共享 OCR 通道 / OCR画线"', aux_start)
     aux = text[aux_start:aux_end]
 
     assert 'text="显示标尺"' in aux
@@ -8046,8 +8135,12 @@ def test_ocr_strategy_order_and_defaults_are_single_engine_first():
 
 
 def test_page_section_editor_is_exposed_in_page_list_and_gap_clicks_are_guarded():
-    source = Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "app.py"
+    root = Path(__file__).resolve().parents[1]
+    source = root / "src" / "picture_capture" / "app.py"
     text = source.read_text(encoding="utf-8")
+    canvas_controller = (
+        root / "src" / "picture_capture" / "ui" / "controllers" / "canvas.py"
+    ).read_text(encoding="utf-8")
     assert 'self.page_list.heading("section", text="Section", anchor="w")' in text
     assert 'self.page_list.bind("<Double-1>", self._page_list_section_double_click, add="+")' in text
     assert "minvalue=0, maxvalue=10" in text
@@ -8056,8 +8149,8 @@ def test_page_section_editor_is_exposed_in_page_list_and_gap_clicks_are_guarded(
     assert "该位置位于 SECTION 间空白区，不添加词条。" in text
     assert "page_sections=list(self.page_sections)" in text
     assert 'self.canvas.configure(cursor="hand2" if self._section_editing else "")' in text
-    assert "if self.image is None or self._section_editing:" in text
-    assert 'self.canvas.delete("cursor-guide")' in text
+    assert "if app.image is None or app._section_editing:" in canvas_controller
+    assert 'app.canvas.delete("cursor-guide")' in canvas_controller
     assert 'text="双击进入Section编辑模式"' in text
     assert '"确认后：拖动虚线定位Section，双击左键确认并退出编辑。"' in text
     assert 'self.canvas.bind("<Double-Button-1>", self.canvas_left_double_click)' in text
@@ -8120,8 +8213,11 @@ def test_visual_marker_crop_trims_white_margin_to_dominant_ink():
 
 
 def test_review_filter_and_main_overlay_ui_contracts_are_exposed():
-    source = Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "app.py"
+    root = Path(__file__).resolve().parents[1] / "src" / "picture_capture"
+    source = root / "app.py"
+    helper_source = root / "review_text_helpers.py"
     text = source.read_text(encoding="utf-8")
+    helper_text = helper_source.read_text(encoding="utf-8")
 
     assert '"一、版面参数"' in text
     assert "页眉Y(原图)" not in text
@@ -8150,7 +8246,7 @@ def test_review_filter_and_main_overlay_ui_contracts_are_exposed():
     assert 'key: tk.BooleanVar(value=(key not in {"digit", "accent"}))' in text
     assert 'accent_button.bind(' in text and '"<Button-3>"' in text
     assert "def copy_char(self, char: str)" in text
-    assert "def _candidate_word_for_ocr_source(" in text
+    assert "def _candidate_word_for_ocr_source(" in helper_text
     assert 'self.focused_page_range_var = parent.page_range_spec_var' in text
     assert 'indices = self.parent._parse_page_spec(' in text
     assert 'ocr_compare_key = self.OCR_COMPARE_LABEL_TO_KEY.get(' in text

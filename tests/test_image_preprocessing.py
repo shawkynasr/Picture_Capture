@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import json
 import math
+import pickle
 from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw
 
-from picture_capture import image_preprocessing
+from picture_capture import (
+    image_preprocessing,
+    image_preprocessing_models,
+    image_preprocessing_persistence,
+    image_preprocessing_reporting,
+    image_preprocessing_storage,
+)
 from picture_capture.image_preprocessing import (
     PreprocessAnalysis,
     analysis_is_current,
@@ -1427,6 +1434,9 @@ def test_promote_processed_pages_requires_only_selected_exports_and_never_overwr
 def test_main_workspace_exposes_and_locks_preprocess_mode() -> None:
     root = Path(__file__).resolve().parents[1]
     source = (root / "src/picture_capture/app.py").read_text(encoding="utf-8")
+    page_controller = (
+        root / "src" / "picture_capture" / "ui" / "controllers" / "page.py"
+    ).read_text(encoding="utf-8")
 
     assert '"图片预处理(前置)"' in source
     assert 'text="进入预处理模式"' in source
@@ -1448,8 +1458,8 @@ def test_main_workspace_exposes_and_locks_preprocess_mode() -> None:
     assert "export_summary_csv(" in source
     assert "allow_page_navigation: bool = False" in source
     assert source.count("allow_page_navigation=True") >= 4
-    assert source.count(
-        'and not getattr(self, "_batch_allow_page_navigation", False)'
+    assert page_controller.count(
+        'and not getattr(app, "_batch_allow_page_navigation", False)'
     ) >= 2
     assert 'text="手动四角"' in source
     assert 'text="重置四角"' in source
@@ -2049,3 +2059,97 @@ def test_bottom_tail_review_triggers_second_residual_pass(
     assert analysis.orthogonal_before_bottom_tail_p90_px == 6.0
     assert analysis.orthogonal_after_bottom_tail_p90_px == 1.0
     assert "orthogonal_residual_pass" in analysis.method
+
+
+def test_phase7a_reporting_helpers_are_reexported_from_stable_module() -> None:
+    assert (
+        image_preprocessing.export_summary_csv
+        is image_preprocessing_reporting.export_summary_csv
+    )
+    assert (
+        image_preprocessing.result_summary
+        is image_preprocessing_reporting.result_summary
+    )
+    assert image_preprocessing.export_summary_csv.__module__.endswith(
+        "image_preprocessing_reporting"
+    )
+
+
+def test_phase7b_storage_helpers_are_reexported_from_stable_module() -> None:
+    for name in (
+        "preview_output_root",
+        "processed_output_root",
+        "promote_processed_pages",
+    ):
+        assert getattr(image_preprocessing, name) is getattr(
+            image_preprocessing_storage, name
+        )
+        assert getattr(image_preprocessing, name).__module__.endswith(
+            "image_preprocessing_storage"
+        )
+
+
+def test_phase7c_persistence_helpers_are_reexported_from_stable_module() -> None:
+    for name in (
+        "result_path",
+        "save_analysis",
+        "load_analysis",
+        "manual_geometry_path",
+        "load_manual_perspective_quad",
+        "save_manual_perspective_quad",
+        "clear_manual_perspective_quad",
+    ):
+        assert getattr(image_preprocessing, name) is getattr(
+            image_preprocessing_persistence, name
+        )
+        assert getattr(image_preprocessing, name).__module__.endswith(
+            "image_preprocessing_persistence"
+        )
+    assert (
+        image_preprocessing.MANUAL_GEOMETRY_FORMAT
+        == image_preprocessing_persistence.MANUAL_GEOMETRY_FORMAT
+    )
+    assert (
+        image_preprocessing.MANUAL_GEOMETRY_VERSION
+        == image_preprocessing_persistence.MANUAL_GEOMETRY_VERSION
+    )
+
+
+def test_phase7m_preprocess_models_keep_historical_public_class_path() -> None:
+    assert (
+        image_preprocessing.PreprocessAnalysis
+        is image_preprocessing_models.PreprocessAnalysis
+    )
+    assert (
+        image_preprocessing.OutputCanvasInfo
+        is image_preprocessing_models.OutputCanvasInfo
+    )
+    assert (
+        image_preprocessing_persistence.PreprocessAnalysis
+        is image_preprocessing_models.PreprocessAnalysis
+    )
+
+    for cls in (
+        image_preprocessing.PreprocessAnalysis,
+        image_preprocessing.OutputCanvasInfo,
+    ):
+        assert cls.__module__ == "picture_capture.image_preprocessing"
+        assert pickle.loads(pickle.dumps(cls)) is cls
+
+
+def test_phase7m_preprocess_model_constants_remain_reexported() -> None:
+    assert (
+        image_preprocessing.PREPROCESS_FORMAT
+        == image_preprocessing_models.PREPROCESS_FORMAT
+        == "picture-capture-image-preprocess"
+    )
+    assert (
+        image_preprocessing.PREPROCESS_FORMAT_VERSION
+        == image_preprocessing_models.PREPROCESS_FORMAT_VERSION
+        == 24
+    )
+    assert (
+        image_preprocessing.DEFAULT_SAFETY_MARGIN_PX
+        == image_preprocessing_models.DEFAULT_SAFETY_MARGIN_PX
+        == 20
+    )

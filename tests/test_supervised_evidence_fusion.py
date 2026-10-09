@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import picture_capture.paddle_headwords as ph
 from picture_capture.models import AppSettings
+from picture_capture import separator_y_refinement as shared_y
 
 
 def _accepted_anchor(boldness: float, height: float = 1.0, gap: float = 18.0):
@@ -277,10 +278,145 @@ def test_body_like_latin_continuation_is_not_rescued_when_not_bold():
     assert candidate["accepted"] is False
 
 
-def test_wrapper_patches_core_runtime_lookup():
-    assert ph._core.filter_headword_records is ph.filter_headword_records
+def test_phase6b_import_keeps_core_supervised_symbols_unmutated():
+    import picture_capture.evidence_fusion as fusion
+
+    assert fusion._core.filter_headword_records is fusion._original_filter_headword_records
     assert (
-        ph._core._annotate_peer_typography_matches
-        is ph._annotate_peer_typography_matches
+        fusion._core._annotate_peer_typography_matches
+        is fusion._original_annotate_peer_typography_matches
+    )
+    assert ph.filter_headword_records is fusion.filter_headword_records
+    assert (
+        ph._annotate_peer_typography_matches
+        is fusion._annotate_peer_typography_matches
     )
     assert callable(ph.detect_paddle_headwords)
+
+
+def test_phase6b_filter_injects_supervised_peer_annotator(monkeypatch):
+    import picture_capture.evidence_fusion as fusion
+
+    seen = {}
+
+    def fake_original(*_args, **kwargs):
+        seen.update(kwargs)
+        return [], []
+
+    monkeypatch.setattr(fusion, "_original_filter_headword_records", fake_original)
+    entries, diagnostics = fusion.filter_headword_records(
+        [],
+        object(),
+        0,
+        0,
+        AppSettings(ocr_language="eng"),
+    )
+
+    assert entries == []
+    assert diagnostics == []
+    assert (
+        seen["peer_typography_annotator"]
+        is fusion._annotate_peer_typography_matches
+    )
+    assert seen["separator_y_refiner"] is shared_y.refine_separator_y
+
+
+
+def test_phase6e_custom_core_separator_refiner_remains_authoritative(monkeypatch):
+    import picture_capture.evidence_fusion as fusion
+
+    custom_refiner = object()
+    seen = {}
+
+    def fake_original(*_args, **kwargs):
+        seen.update(kwargs)
+        return [], []
+
+    monkeypatch.setattr(fusion._core, "refine_separator_y", custom_refiner)
+    monkeypatch.setattr(fusion, "_original_filter_headword_records", fake_original)
+
+    fusion.filter_headword_records(
+        [],
+        object(),
+        0,
+        0,
+        AppSettings(ocr_language="eng"),
+    )
+
+    assert seen["separator_y_refiner"] is custom_refiner
+
+def test_phase6b_detector_injects_supervised_filter(monkeypatch):
+    import picture_capture.evidence_fusion as fusion
+
+    seen = {}
+
+    def fake_detect(*_args, **kwargs):
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr(fusion, "_original_detect_paddle_headwords", fake_detect)
+    result = fusion.detect_paddle_headwords(object(), object(), AppSettings())
+
+    assert result == []
+    assert seen["record_filter"] is fusion.filter_headword_records
+
+
+def test_phase6a_assignment_mirroring_is_public_facade_only(monkeypatch):
+    import picture_capture.evidence_fusion as fusion
+
+    core = ph._core
+    original_core_filter = core.filter_headword_records
+
+    fusion_filter = object()
+    monkeypatch.setattr(fusion, "filter_headword_records", fusion_filter)
+    assert fusion.filter_headword_records is fusion_filter
+    assert core.filter_headword_records is original_core_filter
+
+    public_runner = object()
+    monkeypatch.setattr(ph, "run_paddle_band", public_runner)
+    assert ph.run_paddle_band is public_runner
+    assert core.run_paddle_band is public_runner
+
+
+def test_phase6b_custom_core_filter_remains_authoritative(monkeypatch):
+    import picture_capture.evidence_fusion as fusion
+
+    custom_filter = lambda *_args, **_kwargs: ([], [])
+    seen = {}
+
+    def fake_detect(*_args, **kwargs):
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr(fusion._core, "filter_headword_records", custom_filter)
+    monkeypatch.setattr(fusion, "_original_detect_paddle_headwords", fake_detect)
+
+    fusion.detect_paddle_headwords(object(), object(), AppSettings())
+
+    assert seen["record_filter"] is custom_filter
+
+
+def test_phase6c_public_facade_owns_complete_core_namespace():
+    import picture_capture.evidence_fusion as fusion
+
+    core_names = {
+        name for name in vars(ph._core)
+        if not name.startswith("__")
+    }
+
+    assert core_names <= set(vars(ph))
+    assert core_names <= set(ph.__all__)
+    assert ph.filter_headword_records is fusion.filter_headword_records
+    assert (
+        ph._annotate_peer_typography_matches
+        is fusion._annotate_peer_typography_matches
+    )
+
+
+def test_phase6c_evidence_fusion_no_longer_copies_unrelated_core_namespace():
+    import picture_capture.evidence_fusion as fusion
+
+    assert not hasattr(fusion, "OCRLine")
+    assert "OCRLine" not in fusion.__all__
+    assert hasattr(ph, "OCRLine")
+    assert "OCRLine" in ph.__all__

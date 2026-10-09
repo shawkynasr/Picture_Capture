@@ -3,12 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 import inspect
+import pickle
 
 from PIL import Image, ImageDraw
 
 from picture_capture.layout_rows_cache import (
     CACHE_DIRNAME,
+    capture_layout_rows,
     load_layout_rows_cache,
+    publish_captured_layout,
     recover_physical_rows_fast,
     write_layout_rows_cache,
 )
@@ -79,6 +82,56 @@ def test_layout_rows_cache_invalidates_when_project_geometry_changes(tmp_path):
     ) is None
 
 
+def test_static_capture_publisher_uses_explicit_context_settings(tmp_path):
+    ensure_project_storage(tmp_path, "test")
+    page = tmp_path / "000003.png"
+    Image.new("RGB", (200, 200), "white").save(page)
+    settings = AppSettings(columns=1, manual_x=10, column_width=150, start_y=5, character_height=10)
+    layout = _physical_layout()
+
+    with capture_layout_rows(tmp_path, page, 3, settings):
+        publish_captured_layout(layout, 3)
+
+    loaded = load_layout_rows_cache(
+        tmp_path,
+        page,
+        3,
+        settings,
+        source_size=(200, 200),
+    )
+    assert loaded is not None
+    assert len(loaded.columns[0].lines) == 6
+
+
+def test_layout_core_cache_hit_still_publishes_capture(monkeypatch):
+    from picture_capture import layout_core_understanding as core
+    from picture_capture import layout_rows_cache as rows
+
+    image = Image.new("RGB", (16, 16), "white")
+    settings = AppSettings()
+    result = SimpleNamespace(layout=object())
+    key = (
+        core._image_fingerprint(image),
+        core._settings_fingerprint(settings),
+        4,
+    )
+    core._LAYOUT_CACHE.clear()
+    core._LAYOUT_CACHE[key] = result
+    published = []
+    monkeypatch.setattr(
+        rows,
+        "publish_captured_layout",
+        lambda layout, page_index: published.append((layout, page_index)),
+    )
+    try:
+        assert core.understand_layout_core(image, settings, page_index=4) is result
+    finally:
+        core._LAYOUT_CACHE.clear()
+        image.close()
+
+    assert published == [(result.layout, 4)]
+
+
 def test_fast_physical_recovery_finds_rows_without_full_layout_semantics():
     image = Image.new("RGB", (300, 300), "white")
     draw = ImageDraw.Draw(image)
@@ -113,19 +166,18 @@ def test_fast_recovery_source_cannot_call_full_layout_or_semantic_evidence():
     assert "detect_ordinary_large_head_entries" not in source
 
 
-def test_unlined_export_worker_is_replaced_by_physical_fast_path():
+def test_unlined_export_worker_is_static_physical_fast_path_and_pickleable():
     from picture_capture import unlined_line_export as exporter
-    from picture_capture.unlined_fast_path_runtime import (
-        export_unlined_page_job_fast,
-        install_unlined_fast_path,
-    )
     from picture_capture.unlined_physical_rows_resolver import (
         resolve_unlined_physical_rows,
     )
 
-    install_unlined_fast_path()
-    assert exporter.export_unlined_page_job is export_unlined_page_job_fast
-    source = inspect.getsource(export_unlined_page_job_fast)
+    job = exporter.export_unlined_page_job
+    assert job.__module__ == "picture_capture.unlined_line_export"
+    payload = pickle.dumps(job)
+    assert b"picture_capture.unlined_line_export" in payload
+
+    source = inspect.getsource(job)
     assert "resolve_unlined_physical_rows" in source
     assert "understand_layout_core" not in source
     assert "build_analysis_image" not in source
@@ -146,15 +198,35 @@ def test_gui_and_worker_composition_seed_layout_rows_for_future_qa():
     worker = (
         root / "src" / "picture_capture" / "bootstrap" / "worker.py"
     ).read_text(encoding="utf-8")
-    spawn = (
-        root / "src" / "picture_capture" / "spawn_detection_runtime.py"
+    processing = (
+        root / "src" / "picture_capture" / "processing.py"
+    ).read_text(encoding="utf-8")
+    crop = (
+        root / "src" / "picture_capture" / "ui" / "controllers" / "crop.py"
+    ).read_text(encoding="utf-8")
+    exporter = (
+        root / "src" / "picture_capture" / "unlined_line_export.py"
     ).read_text(encoding="utf-8")
 
-    assert "install_layout_rows_persistence_runtime()" in gui
-    assert "install_unlined_fast_path()" in gui
-    assert gui.index("install_unlined_fast_path()") < gui.index(
-        "install_unlined_line_export_ui(app_module)"
+    layout_core = (
+        root / "src" / "picture_capture" / "layout_core_understanding.py"
+    ).read_text(encoding="utf-8")
+    rows = (
+        root / "src" / "picture_capture" / "layout_rows_cache.py"
+    ).read_text(encoding="utf-8")
+
+    assert "install_layout_rows_persistence_runtime()" not in gui
+    assert "install_unlined_fast_path" not in gui
+    assert "unlined_fast_path_runtime" not in gui
+    assert "install_unlined_line_export_ui" not in gui
+    assert "unlined_export.export_unlined_page_job" in crop
+    assert "resolve_unlined_physical_rows" in exporter
+    assert "install_layout_rows_persistence_runtime()" not in worker
+    assert "with services.capture_layout_rows(" in processing
+    assert "_publish_captured_result(cached, page_index)" in layout_core
+    assert "_publish_captured_result(result, page_index)" in layout_core
+    assert "core.understand_layout_core =" not in rows
+    assert "shared.shared_snapshot_for_app =" not in rows
+    assert "install_layout_rows_persistence_runtime()" not in inspect.getsource(
+        __import__("picture_capture.processing", fromlist=["detect_entries_job"]).detect_entries_job
     )
-    assert "install_layout_rows_persistence_runtime()" in worker
-    assert "with services.capture_layout_rows(" in spawn
-    assert "install_layout_rows_persistence_runtime()" not in spawn

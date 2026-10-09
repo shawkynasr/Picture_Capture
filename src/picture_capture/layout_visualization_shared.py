@@ -8,10 +8,13 @@ launcher/worker differences, and duplicate physical page analysis from producing
 two role assignments for one page.
 """
 
+from pathlib import Path
 from typing import Any
 
 from .dictionary_page_layout_policy import resolve_page_layout_policy
+from .layout_rows_cache import capture_layout_rows
 from .image_utils import build_analysis_image
+from .layout_role_provenance import indent_blocks_with_entry_sources
 from .layout_physical_indent import normalized_physical_indents
 from .processing import (
     ORDINARY_AUTO_LAYOUT_FIELDS,
@@ -20,45 +23,9 @@ from .processing import (
 )
 
 
-def _indent_blocks_from_understanding(understanding: Any) -> list[dict[str, Any]]:
-    """Return canonical per-line actual-indent spans for diagnostics."""
-    layout = understanding.layout
-    blocks: list[dict[str, Any]] = []
-    body_top = int(layout.body_top)
-
-    for column in layout.columns:
-        column_left = int(column.left)
-        body = getattr(column, "body_mode", None)
-        body_local_x = float(body.center) if body is not None else None
-        for line in list(getattr(column, "lines", []) or []):
-            first_local_x = max(0.0, float(getattr(line, "first_x", 0) or 0))
-            anchor = getattr(line, "anchor_x", None)
-            anchor_local_x = float(anchor) if anchor is not None else None
-            x0 = float(column_left)
-            x1 = float(column_left) + first_local_x
-            y0 = body_top + int(getattr(line, "y0", 0) or 0)
-            y1 = body_top + int(getattr(line, "y1", 0) or 0)
-            if y1 <= y0:
-                continue
-            blocks.append({
-                "column": int(getattr(column, "index", 0) or 0),
-                "x0": x0,
-                "x1": x1,
-                "y0": int(y0),
-                "y1": int(y1),
-                "first_x": x1,
-                "anchor_x": (
-                    float(column_left) + anchor_local_x
-                    if anchor_local_x is not None else None
-                ),
-                "body_x": (
-                    float(column_left) + body_local_x
-                    if body_local_x is not None else None
-                ),
-                "indent_px": first_local_x,
-                "role": str(getattr(line, "role", "") or "unknown"),
-            })
-    return blocks
+# Provenance now statically wraps the same drift-corrected block producer
+# that the historical GUI installer captured after Phase 5I.
+_indent_blocks_from_understanding = indent_blocks_with_entry_sources
 
 
 def _indent_lanes_from_understanding(understanding: Any) -> list[dict[str, Any]]:
@@ -110,8 +77,8 @@ def _indent_lanes_from_understanding(understanding: Any) -> list[dict[str, Any]]
     return lanes
 
 
-def shared_snapshot_for_app(app: Any) -> Any:
-    """Return a LayoutVisualizationSnapshot from the ordinary shared geometry."""
+def _shared_snapshot_for_app_impl(app: Any) -> Any:
+    """Build the ordinary shared Layout snapshot without cache-capture routing."""
     from . import layout_visualization_ui as ui
 
     if getattr(app, "image", None) is None:
@@ -216,8 +183,34 @@ def shared_snapshot_for_app(app: Any) -> Any:
             pass
 
 
-def install_shared_layout_visualization_source() -> None:
-    """Patch the existing overlay before the v3 summary wrapper imports it."""
-    from . import layout_visualization_ui as ui
+def shared_snapshot_for_app(app: Any) -> Any:
+    """Return the shared Layout snapshot while seeding the physical-row cache."""
+    project = getattr(app, "project", None)
+    if project is None:
+        return _shared_snapshot_for_app_impl(app)
+    try:
+        index = max(0, int(getattr(app, "current_index", 0)))
+        images = list(getattr(project, "images", []) or [])
+    except Exception:
+        return _shared_snapshot_for_app_impl(app)
+    if not (0 <= index < len(images)):
+        return _shared_snapshot_for_app_impl(app)
 
-    ui._snapshot_for_app = shared_snapshot_for_app
+    # Preserve the historical visualization-runtime contract: cache identity is
+    # based on persisted app settings, while the snapshot implementation remains
+    # free to derive page-effective settings internally.
+    settings = getattr(app, "settings", None)
+    if settings is None:
+        return _shared_snapshot_for_app_impl(app)
+    with capture_layout_rows(
+        Path(project.root),
+        Path(images[index]),
+        index,
+        settings,
+    ):
+        return _shared_snapshot_for_app_impl(app)
+
+
+def install_shared_layout_visualization_source() -> None:
+    """Compatibility no-op; the shared snapshot binding is now static."""
+    return None

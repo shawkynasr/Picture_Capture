@@ -15,7 +15,7 @@ typography size level; they are not a rescue heuristic layered on normal lines.
 """
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -24,7 +24,7 @@ from .image_utils import normalize_page_rgb
 from .layout_detection import _projection_layout_estimate, analysis_ink_mask
 from .layout_transform import LayoutTransform
 from .models import AppSettings, Entry
-from .ordinary_visual import _components, _fill_short_gaps, _patch_similarity, _runs
+from .ordinary_visual import _components, _fill_short_gaps, _runs
 from .profile_indent_ui import indent_type_label
 from .profile_semantics import (
     effective_page_settings,
@@ -377,17 +377,45 @@ def _line_feature(
     )
 
 
+def _shape_signature(patch: np.ndarray) -> tuple[np.ndarray, float]:
+    """Return the historical normalized 12x24 patch vector and its norm."""
+    image = Image.fromarray((patch.astype(np.uint8) * 255), mode="L")
+    try:
+        values = np.asarray(
+            image.resize((12, 24), Image.Resampling.NEAREST),
+            dtype=np.float32,
+        ).ravel().copy()
+    finally:
+        image.close()
+    values -= float(values.mean())
+    return values, float(np.linalg.norm(values))
+
+
 def _shape_consensus(lines: list[LayoutLine]) -> float:
     usable = [line for line in lines if line.patch.size]
     if len(usable) < 2:
         return 0.0
-    return max(
-        sum(
-            _patch_similarity(prototype.patch, line.patch) >= 0.52
-            for line in usable
-        ) / float(len(usable))
-        for prototype in usable
-    )
+
+    # The historical implementation called _patch_similarity for every pair,
+    # repeatedly resizing, centering and normalizing the same patches O(N^2)
+    # times. Preserve the same pairwise cosine comparison and threshold while
+    # preparing each patch only once per cluster.
+    prepared = [_shape_signature(line.patch) for line in usable]
+    count = float(len(prepared))
+    best = 0.0
+    for prototype_values, prototype_norm in prepared:
+        matched = 0
+        if prototype_norm > 1e-6:
+            for line_values, line_norm in prepared:
+                if line_norm <= 1e-6:
+                    continue
+                similarity = float(
+                    np.dot(prototype_values, line_values)
+                    / (prototype_norm * line_norm)
+                )
+                matched += int(similarity >= 0.52)
+        best = max(best, matched / count)
+    return best
 
 
 def _indent_modes(lines: list[LayoutLine], reference: float) -> list[IndentMode]:
@@ -456,6 +484,40 @@ def _assign_indent_semantics(
             mode.role = "entry"
             entries.append(mode)
     column.entry_modes = entries
+
+
+@dataclass(frozen=True, slots=True)
+class LayoutPrimitiveOps:
+    """Immutable callbacks for the four Page Design primitive hook points.
+
+    This is dependency plumbing only. Existing installer behavior is retained
+    through current_layout_ops() until product consumers use explicit ops.
+    """
+
+    line_runs: Callable[..., Any]
+    line_feature: Callable[..., Any]
+    indent_modes: Callable[..., Any]
+    assign_indent_semantics: Callable[..., Any]
+
+
+# Capture the native helpers before any historical runtime installer can rebind
+# their module-level names. Explicit raw callers remain immune to later patches.
+RAW_LAYOUT_OPS = LayoutPrimitiveOps(
+    line_runs=_line_runs,
+    line_feature=_line_feature,
+    indent_modes=_indent_modes,
+    assign_indent_semantics=_assign_indent_semantics,
+)
+
+
+def current_layout_ops() -> LayoutPrimitiveOps:
+    """Snapshot currently installed hooks during the Phase 13B transition."""
+    return LayoutPrimitiveOps(
+        line_runs=_line_runs,
+        line_feature=_line_feature,
+        indent_modes=_indent_modes,
+        assign_indent_semantics=_assign_indent_semantics,
+    )
 
 
 def _line_pitch(columns: list[ColumnDesign], reference: float) -> float:
@@ -635,7 +697,9 @@ def infer_dictionary_page_layout(
     settings: AppSettings,
     *,
     page_index: int = 0,
+    ops: LayoutPrimitiveOps | None = None,
 ) -> DictionaryPageLayout:
+    resolved_ops = current_layout_ops() if ops is None else ops
     source, canonical, transform, effective = _analysis_page(image, settings, page_index)
     top, bottom, starts, rights = _initial_geometry(canonical, effective)
     page_ink = analysis_ink_mask(
@@ -653,7 +717,7 @@ def infer_dictionary_page_layout(
             width = max(1, right - left)
             strip = page_ink[top:bottom, left:left + _leading_width(width, scale)]
             strips.append(strip)
-            runs.append(_line_runs(strip, scale))
+            runs.append(resolved_ops.line_runs(strip, scale))
         return strips, runs
 
     strips, raw_runs = column_strips(seed)
@@ -671,12 +735,12 @@ def infer_dictionary_page_layout(
         column = ColumnDesign(index, left, right, gutter)
         previous_end = 0
         for y0, y1 in runs:
-            line = _line_feature(index, strip, y0, y1, reference, previous_end)
+            line = resolved_ops.line_feature(index, strip, y0, y1, reference, previous_end)
             previous_end = max(previous_end, y1)
             if line is not None and reference * 0.45 <= line.height <= reference * 1.55:
                 column.lines.append(line)
-        column.indent_modes = _indent_modes(column.lines, reference)
-        _assign_indent_semantics(column, indent_type, reference)
+        column.indent_modes = resolved_ops.indent_modes(column.lines, reference)
+        resolved_ops.assign_indent_semantics(column, indent_type, reference)
         columns.append(column)
 
     # Transfer the page's proven entry offset into sparse columns.
@@ -909,6 +973,19 @@ def infer_entry_boundaries(
     return entries
 
 
+def _detect_entries_from_page_design_base(
+    image: Image.Image,
+    settings: AppSettings,
+    *,
+    page_index: int = 0,
+    page_sections: list[Any] | None = None,
+) -> LayoutDetectionResult:
+    """Retain the original unrefined materialization for focused diagnostics."""
+    layout = infer_dictionary_page_layout(image, settings, page_index=page_index)
+    entries = infer_entry_boundaries(layout, page_sections=page_sections) if layout.reliable else []
+    return LayoutDetectionResult(entries=entries, layout=layout)
+
+
 def detect_entries_from_page_design(
     image: Image.Image,
     settings: AppSettings,
@@ -916,6 +993,17 @@ def detect_entries_from_page_design(
     page_index: int = 0,
     page_sections: list[Any] | None = None,
 ) -> LayoutDetectionResult:
-    layout = infer_dictionary_page_layout(image, settings, page_index=page_index)
-    entries = infer_entry_boundaries(layout, page_sections=page_sections) if layout.reliable else []
-    return LayoutDetectionResult(entries=entries, layout=layout)
+    """Use the refined detector without requiring process-global rebinding."""
+    # Local import avoids the base <-> refined module cycle. The refined
+    # implementation consumes base geometry helpers but never calls this public
+    # forwarding function, so call-time delegation cannot recurse.
+    from .dictionary_page_design_refined import (
+        detect_entries_from_page_design as refined_detect_entries,
+    )
+
+    return refined_detect_entries(
+        image,
+        settings,
+        page_index=page_index,
+        page_sections=page_sections,
+    )

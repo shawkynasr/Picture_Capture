@@ -18,32 +18,43 @@ def test_core_bootstrap_returns_shared_process_modules() -> None:
 
 
 def test_core_bootstrap_is_idempotent() -> None:
+    layout_runtime = processing._ensure_layout_runtime
     first = build_core_services()
     second = build_core_services()
 
     assert first.formats is second.formats is formats
     assert first.processing is second.processing is processing
+    assert processing._ensure_layout_runtime is layout_runtime
     assert bool(getattr(formats, "_entry_classification_installed", False))
-    assert bool(getattr(processing, "_entry_classification_runtime_installed", False))
-    assert bool(getattr(processing, "_pc_spawn_layout_runtime_installed", False))
+    assert processing._ordinary_marker_local_crop is processing._core._ordinary_marker_local_crop
+    assert (
+        processing.ocr_existing_entry_words_from_markers
+        is processing._core.ocr_existing_entry_words_from_markers
+    )
+    assert not hasattr(processing, "_pc_spawn_layout_runtime_installed")
 
 
-def test_core_composition_preserves_import_sensitive_install_order() -> None:
+def test_core_composition_preserves_remaining_import_sensitive_install_order() -> None:
     source = (
         ROOT / "src" / "picture_capture" / "bootstrap" / "core.py"
     ).read_text(encoding="utf-8")
 
-    character_height = source.index("install_character_height_fallback_runtime()")
-    live_binding = source.index("install_live_layout_detector_binding()")
-    large_head = source.index("install_ordinary_large_head_runtime()")
     processing_import = source.index("from .. import processing as processing_module")
 
-    assert character_height < live_binding < large_head < processing_import
+    assert "install_live_layout_detector_binding" not in source
+    assert "install_character_height_fallback_runtime" not in source
+    assert "spawn_layout_runtime" not in source
+    assert "install_ordinary_large_head_runtime" not in source
+    assert "install_ordinary_large_head_role_guard" not in source
+    assert "install_entry_classification_fields" not in source
+    assert "install_separator_y_settings" not in source
+    assert "install_entry_crop_settings" not in source
     assert source.index("install_pdic_classification(formats)") < processing_import
-    assert source.index("install_processing_entry_classification(processing_module)") > processing_import
+    assert "install_processing_entry_classification" not in source
+    assert "entry_classification_runtime" not in source
 
 
-def test_core_profile_owns_former_package_import_compatibility_chain() -> None:
+def test_core_profile_owns_only_remaining_compatibility_chain() -> None:
     core = (
         ROOT / "src" / "picture_capture" / "bootstrap" / "core.py"
     ).read_text(encoding="utf-8")
@@ -52,22 +63,26 @@ def test_core_profile_owns_former_package_import_compatibility_chain() -> None:
     ).read_text(encoding="utf-8")
 
     installers = (
-        "install_layout_illustration_mask_settings",
-        "install_character_height_fallback_runtime",
-        "install_live_layout_detector_binding",
-        "install_ordinary_large_head_runtime",
-        "install_ordinary_large_head_role_guard",
-        "install_separator_y_settings",
-        "install_entry_crop_settings",
-        "install_entry_classification_fields",
         "install_pdic_classification",
-        "install_processing_entry_classification",
-        "install_spawn_layout_runtime",
-        "install_layout_illustration_mask_runtime",
     )
     for name in installers:
         assert f"{name}(" in core
         assert f"{name}(" not in package_init
+
+    for retired in (
+        "install_separator_y_settings",
+        "install_entry_crop_settings",
+        "install_entry_classification_fields",
+        "install_spawn_layout_runtime",
+        "install_ordinary_large_head_runtime",
+        "install_ordinary_large_head_role_guard",
+        "install_processing_entry_classification",
+        "entry_classification_runtime",
+        "install_layout_illustration_mask_settings",
+        "install_layout_illustration_mask_runtime",
+    ):
+        assert retired not in core
+        assert retired not in package_init
 
     assert "__version__" in package_init
     assert "from ." not in package_init

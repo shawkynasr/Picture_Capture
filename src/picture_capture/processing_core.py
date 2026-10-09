@@ -3,17 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 import os
 import re
 import json
 import subprocess
 import unicodedata
-import uuid
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
-from .models import AppSettings, Entry, PolygonRegion, read_noncomment_lines, resolved_tesseract_language
+from .models import AppSettings, Entry, PolygonRegion, resolved_tesseract_language
 from .coordinate_space import SOURCE_COORDINATE_SPACE
 from .image_utils import normalize_page_rgb
 from .layout_transform import LayoutTransform
@@ -26,7 +26,17 @@ from .profile_semantics import (
 )
 from .ocr_engines import find_tesseract
 from .formats import read_pdic, read_ppp, write_pdic, write_ppp
-from .project_storage import crop_log_path, pdic_path_for_image, ppp_read_path_for_image, ppp_write_path_for_image, qt_root, special_pages_path
+from .project_storage import pdic_path_for_image, ppp_read_path_for_image, ppp_write_path_for_image, qt_root, special_pages_path
+from .processing_publish import _publish_file_transaction, _publish_temp_path
+from .crop_plan_formatting import (
+    _normalized_crop_name,
+    entry_crop_piece_filename,
+    page_crop_plan_dict,
+    polygon_display_name,
+)
+from .ocr_text_io import export_ocred, import_ocred, load_replace_rules, process_ocr_text
+from .crop_logging import append_crop_log, append_illustration_crop_log
+from .ordinary_vb_brightness import legacy_row_brightness_scores_1000
 
 
 _COLUMN_TRACK_ADAPTIVE_BLOCK = 19
@@ -177,11 +187,6 @@ class PageCropPlan:
     entry_pieces: list[EntryCropPiecePlan]
     illustrations: list[IllustrationCropPlan]
     integrate_illustrations: bool = True
-
-
-def entry_crop_piece_filename(page_stem: str, piece: EntryCropPiecePlan) -> str:
-    """Return the exact output filename used for an entry crop-plan piece."""
-    return f"{page_stem}_WW_{piece.output_index:03d}{piece.suffix}.png"
 
 
 @dataclass(slots=True)
@@ -794,16 +799,15 @@ def _legacy_find_separator_y(
             "extra_white_rows": int(extra_white),
         }
 
-    # VB method 2: relax the row-white requirement 999 -> 700 (defaults), in
-    # steps of two for narrow gaps, skewed rows, and protruding glyphs.
+    row_scores = legacy_row_brightness_scores_1000(
+        rgb_sum, xs, int(top), int(candidate_y), upward, span,
+    )
     for threshold in range(high, low - 1, -2):
         for ysu in range(1, upward + 1):
             line_y = int(candidate_y) - ysu
             if line_y < int(top):
                 break
-            score = _legacy_row_brightness_1000(
-                rgb_sum, line_y, candidate_x, span, direction=direction
-            )
+            score = row_scores.get(line_y)
             if score is None or score <= threshold:
                 continue
 
@@ -813,9 +817,7 @@ def _legacy_find_separator_y(
                     probe_y = int(candidate_y) - ygiu
                     if probe_y < int(top):
                         break
-                    probe = _legacy_row_brightness_1000(
-                        rgb_sum, probe_y, candidate_x, span, direction=direction
-                    )
+                    probe = row_scores.get(probe_y)
                     if probe is None:
                         break
                     if probe < low or probe + 50 < threshold:
@@ -1450,18 +1452,13 @@ def _separator_whitespace_score(
     entry: Entry,
     geometry: Geometry,
     settings: AppSettings,
+    gray: np.ndarray | None = None,
 ) -> float | None:
-    """Return 0..1 local blank-boundary evidence at one marker Y.
-
-    The score is deliberately local to the reading edge.  Across the real
-    benchmark dictionaries, corrected PDIC boundaries are almost always placed
-    on a near-white separator row even when headword typography differs greatly.
-    Using a local Otsu threshold makes the cue robust to yellow/gray scan paper.
-    """
+    """Return 0..1 local blank-boundary evidence at one marker Y."""
     if geometry.transform.kind not in {"identity", "mirror_x"}:
         return None
-    source = normalize_page_rgb(image)
-    gray = np.asarray(ImageOps.grayscale(source), dtype=np.uint8)
+    if gray is None:
+        gray = np.asarray(ImageOps.grayscale(normalize_page_rgb(image)), dtype=np.uint8)
     if gray.size == 0:
         return None
     y = max(0, min(gray.shape[0] - 1, int(entry.y)))
@@ -1513,15 +1510,16 @@ def _prefer_ocr_separator_position(
     ocr: Entry,
     geometry: Geometry,
     settings: AppSettings,
+    gray: np.ndarray | None = None,
 ) -> tuple[bool, float | None, float | None]:
     """Choose OCR Y only when its local blank boundary is materially stronger."""
     if image is None:
         return _is_single_cjk_headword(ocr.word), None, None
     ordinary_score = _separator_whitespace_score(
-        image, ordinary, geometry, settings,
+        image, ordinary, geometry, settings, gray,
     )
     ocr_score = _separator_whitespace_score(
-        image, ocr, geometry, settings,
+        image, ocr, geometry, settings, gray,
     )
     if ordinary_score is None or ocr_score is None:
         return _is_single_cjk_headword(ocr.word), ordinary_score, ocr_score
@@ -1914,6 +1912,10 @@ def _fuse_detection_entries(
         if count:
             suppressed_by_ocr[ocr_index] = count
 
+    separator_gray = (
+        np.asarray(ImageOps.grayscale(normalize_page_rgb(image)), dtype=np.uint8)
+        if image is not None and ordinary_to_ocr else None
+    )
     fused: list[Entry] = []
     for ordinary_index, (ordinary, _ordinary_col, _ordinary_u, _ordinary_v) in enumerate(ordinary_rows):
         ocr_index = ordinary_to_ocr.get(ordinary_index)
@@ -1968,7 +1970,7 @@ def _fuse_detection_entries(
             continue
         ocr = ocr_rows[ocr_index][0]
         use_semantic_position, ordinary_ws, ocr_ws = _prefer_ocr_separator_position(
-            image, ordinary, ocr, geometry, settings,
+            image, ordinary, ocr, geometry, settings, separator_gray,
         )
         merged_entry = _entry_with_fused_metadata(
             ordinary,
@@ -2045,8 +2047,10 @@ def detect_entries(
     paddle_filter_rules_path: Path | None = None,
     profile_page_index: int = 0,
     page_sections: list[PageSection] | None = None,
+    left_edge_detector: Any | None = None,
 ) -> tuple[list[Entry], Geometry]:
     """Detect markers with the active Project Profile page template applied."""
+    detect_left_edge = left_edge_detector or _detect_entries_left_edge
     source = normalize_page_rgb(image)
     effective = effective_page_settings(settings, source.size, profile_page_index)
     analysis_source = page_template_analysis_image(source, effective, profile_page_index)
@@ -2069,7 +2073,7 @@ def detect_entries(
             ordinary_effective, _applied_layout = ordinary_page_layout_settings(
                 analysis_source, effective
             )
-            ordinary_entries, _ordinary_geometry = _detect_entries_left_edge(
+            ordinary_entries, _ordinary_geometry = detect_left_edge(
                 analysis_source, ordinary_effective, page_sections=page_sections
             )
             review_candidates: list[dict] = []
@@ -2098,7 +2102,7 @@ def detect_entries(
         ordinary_effective, _applied_layout = ordinary_page_layout_settings(
             analysis_source, effective
         )
-        entries, geometry = _detect_entries_left_edge(
+        entries, geometry = detect_left_edge(
             analysis_source, ordinary_effective, page_sections=page_sections
         )
 
@@ -2209,26 +2213,6 @@ def detect_entries_job(
     return len(entries)
 
 
-def load_replace_rules(path: Path) -> list[tuple[str, str, str]]:
-    if not path.exists():
-        return []
-    rules: list[tuple[str, str, str]] = []
-    for line in read_noncomment_lines(path):
-        parts = line.split("\t")
-        if len(parts) >= 2 and parts[0] in {"N", "R"}:
-            rules.append((parts[0], parts[1], parts[2] if len(parts) >= 3 else ""))
-    return rules
-
-
-def process_ocr_text(text: str, rules: list[tuple[str, str, str]], lowercase: bool) -> str:
-    text = text.replace("'", "").strip()
-    nonempty = [line.strip() for line in text.splitlines() if line.strip()]
-    if nonempty:
-        multiword = [line for line in nonempty if len(line.split()) > 1]
-        text = multiword[0] if multiword else nonempty[0]
-    for kind, search, replacement in rules:
-        text = text.replace(search, replacement) if kind == "N" else re.sub(search, replacement, text)
-    return text.lower() if lowercase else text
 
 
 def run_tesseract(image: Image.Image, language: str, executable: str = "tesseract", psm: int = 7) -> str:
@@ -2384,168 +2368,28 @@ def line_box(entry: Entry, geometry: Geometry, image: Image.Image, settings: App
     return clamp_box(geometry.transform.canonical_box_to_source(canonical_box, geometry.source_size), image)
 
 
+
 def _ordinary_marker_local_crop(
     canonical: Image.Image,
     entry: Entry,
     geometry: Geometry,
     settings: AppSettings,
+    *,
+    row_metrics=None,
 ) -> tuple[Image.Image, bool]:
-    """Return a text-only OCR crop anchored to one existing ordinary marker.
+    """Return the canonical classification-aware crop for one marker."""
+    from .entry_classification import get_entry_classification
+    from .entry_ocr_crop import entry_ocr_crop_box
 
-    The marker is the geometry authority. This helper never moves it. Horizontal
-    CJK display heads get a taller crop only when the original pixels immediately
-    below the marker form one oversized left-edge glyph; ordinary rows keep the
-    normal line-height crop. The distinction is image-driven and does not depend
-    on OCR having already recognized the character.
-    """
-    _u, marker_v = geometry.source_to_canonical(int(entry.x), int(entry.y))
-    col = column_index_for_click(int(entry.x), geometry, int(entry.y))
-    col = max(0, min(len(geometry.column_starts) - 1, int(col)))
-    tracked_x = int(geometry.x_at(col, int(marker_v)))
-    canonical_width, canonical_height = canonical.size
-
-    character_height = max(
-        2, int(round(float(getattr(settings, "character_height", 26) or 26)))
+    box = entry_ocr_crop_box(
+        entry,
+        geometry,
+        settings,
+        canonical.size,
+        row_metrics=row_metrics,
     )
-    row_padding = max(0, int(round(float(getattr(settings, "row_padding", 0) or 0))))
-    column_width = max(
-        24,
-        int(
-            getattr(settings, "column_width", 0)
-            or (
-                geometry.column_widths[col]
-                if 0 <= col < len(geometry.column_widths)
-                else canonical_width
-            )
-        ),
-    )
-    left_pad = max(2, round(character_height * 0.12))
-    crop_left = max(0, tracked_x - left_pad)
-
-    profile_id = str(getattr(settings, "dictionary_profile_id", "") or "").lower()
-    lang = str(getattr(settings, "ocr_language", "") or "").lower()
-    paddle_lang = str(getattr(settings, "paddle_language", "") or "").lower()
-    cjk_mode = bool(
-        "cjk" in profile_id
-        or any(token in lang for token in ("chi_sim", "chi_tra", "chinese"))
-        or paddle_lang in {"ch", "chi_sim", "chi_tra", "chinese_cht"}
-    )
-
-    is_large = False
-    large_bottom = int(marker_v + character_height)
-    if (
-        cjk_mode
-        and bool(getattr(settings, "profile_cjk_allow_single_headword", True))
-        and not str(getattr(settings, "layout_writing_mode", "horizontal-tb")).startswith("vertical")
-    ):
-        probe_width = min(
-            max(1, canonical_width - crop_left),
-            max(72, round(character_height * 3.2)),
-        )
-        probe_top = max(0, int(marker_v))
-        probe_bottom = min(
-            canonical_height,
-            probe_top + max(round(character_height * 3.2), character_height + 8),
-        )
-        if probe_width >= 12 and probe_bottom > probe_top + 2:
-            probe = np.asarray(
-                ImageOps.grayscale(
-                    canonical.crop(
-                        (crop_left, probe_top, crop_left + probe_width, probe_bottom)
-                    )
-                ),
-                dtype=np.uint8,
-            )
-            threshold = _left_edge_otsu_threshold(probe)
-            dark = probe <= threshold
-            active = dark.sum(axis=1) >= max(3, round(probe_width * 0.015))
-
-            raw_runs: list[tuple[int, int]] = []
-            i = 0
-            active_list = active.tolist()
-            while i < len(active_list):
-                if not active_list[i]:
-                    i += 1
-                    continue
-                end = i + 1
-                while end < len(active_list) and active_list[end]:
-                    end += 1
-                raw_runs.append((i, end))
-                i = end
-
-            # Bridge only tiny internal white slits whose upper/lower fragments
-            # occupy essentially the same X footprint. This mirrors the ordinary
-            # large-CJK duplicate suppressor without merging neighbouring rows.
-            bridge_gap = max(2, round(character_height * 0.18))
-            runs: list[tuple[int, int]] = []
-            for start, end in raw_runs:
-                if not runs:
-                    runs.append((start, end))
-                    continue
-                prev_start, prev_end = runs[-1]
-                gap = start - prev_end
-                should_bridge = False
-                if 0 <= gap <= bridge_gap:
-                    prev_cols = dark[prev_start:prev_end].any(axis=0)
-                    next_cols = dark[start:end].any(axis=0)
-                    smaller = min(int(prev_cols.sum()), int(next_cols.sum()))
-                    overlap = int((prev_cols & next_cols).sum())
-                    should_bridge = bool(
-                        smaller > 0 and overlap / float(smaller) >= 0.65
-                    )
-                if should_bridge:
-                    runs[-1] = (prev_start, end)
-                else:
-                    runs.append((start, end))
-
-            minimum_large = max(
-                round(character_height * 1.45),
-                character_height + 1,
-            )
-            max_start_offset = max(4, round(character_height * 0.65))
-            for start, end in runs:
-                run_height = end - start
-                if start <= max_start_offset and run_height >= minimum_large:
-                    is_large = True
-                    large_bottom = min(
-                        canonical_height,
-                        probe_top + end + max(2, round(character_height * 0.15)),
-                    )
-                    break
-
-    if is_large:
-        # One display Han glyph: keep the crop tight horizontally so pinyin and
-        # definition text cannot overwhelm single-character recognition.
-        height = max(character_height, large_bottom - int(marker_v))
-        crop_width = min(
-            column_width,
-            max(round(height * 1.75), round(character_height * 2.6), 72),
-        )
-        crop_top = max(0, int(marker_v) - max(1, round(character_height * 0.06)))
-        crop_bottom = max(crop_top + 2, large_bottom)
-    else:
-        # Ordinary row: include enough right context for bracket/POS/pinyin
-        # parsers, but do not OCR the full definition line.
-        regular_height = max(
-            character_height + 2 * row_padding,
-            round(character_height * 1.20),
-        )
-        crop_width = min(
-            column_width,
-            max(
-                round(character_height * 9.0),
-                round(column_width * 0.45),
-                120,
-            ),
-        )
-        crop_top = max(0, int(marker_v) - row_padding)
-        crop_bottom = min(canonical_height, crop_top + regular_height)
-
-    crop_right = min(canonical_width, crop_left + max(24, int(crop_width)))
-    crop_bottom = min(canonical_height, max(crop_top + 2, int(crop_bottom)))
-    return normalize_page_rgb(
-        canonical.crop((crop_left, crop_top, crop_right, crop_bottom))
-    ), bool(is_large)
+    meta = get_entry_classification(entry)
+    return normalize_page_rgb(canonical.crop(box)), meta.entry_scale == "oversized"
 
 
 def ocr_existing_entry_words_from_markers(
@@ -2559,37 +2403,33 @@ def ocr_existing_entry_words_from_markers(
     profile_path: Path | None = None,
     only_blank: bool = True,
 ) -> tuple[list[Entry], dict[str, int]]:
-    """Fill text for existing markers without changing marker geometry.
+    """Fill existing markers through the shared multi-engine OCR channel.
 
-    This is the dedicated companion to ordinary drawing. Existing PDIC marker
-    coordinates/count are immutable; PaddleOCR is run only on a local crop below
-    each marker. Normal rows and visually oversized CJK display heads use
-    different crop heights. By default only empty, non-manual entries are filled.
+    Marker coordinates/count remain immutable. Crop geometry comes from
+    canonical Entry classification plus physical row metrics, while one
+    OCR channel session is reused for every eligible marker on the page.
     """
-    source, effective, analysis_source, geometry = _page_geometry_context(
+    _source, effective, analysis_source, geometry = _page_geometry_context(
         image, settings, profile_page_index,
     )
     canonical = geometry.transform.canonical_image_for_analysis(analysis_source)
     ordered = sort_entries_reading_order(entries, geometry, page_sections)
 
-    from .dictionary_profile import (
-        effective_project_profile_id,
-        load_dictionary_profile,
-    )
-    from .paddle_headwords import (
-        _single_cjk_from_local_records,
-        get_paddle_engine,
-        group_ocr_records,
-        parse_headword_text,
-        run_paddle_band,
-    )
+    from .dictionary_profile import effective_project_profile_id, load_dictionary_profile
+    from .entry_ocr_crop import resolve_entry_ocr_row_metrics
+    from .ocr_channel import OcrChannelSession, OcrTextChoice, choose_ocr_text
+    from .paddle_headwords import parse_headword_text
 
+    row_metrics = resolve_entry_ocr_row_metrics(
+        image,
+        settings,
+        page_index=profile_page_index,
+    )
     profile = load_dictionary_profile(
         profile_path,
         preset=effective_project_profile_id(effective, profile_path),
         language=effective.ocr_language,
     )
-
     stats = {
         "total": len(ordered),
         "filled": 0,
@@ -2607,8 +2447,7 @@ def ocr_existing_entry_words_from_markers(
         )
     ]
     stats["skipped_existing"] = sum(
-        1 for entry in ordered
-        if only_blank and str(entry.word or "").strip()
+        1 for entry in ordered if only_blank and str(entry.word or "").strip()
     )
     stats["skipped_manual"] = sum(
         1 for entry in ordered
@@ -2618,97 +2457,136 @@ def ocr_existing_entry_words_from_markers(
     if not targets:
         return ordered, stats
 
-    engine = get_paddle_engine(effective)
+    channel = OcrChannelSession(effective)
+
+    def parsed_or_raw(raw: str) -> str:
+        text = str(raw or "").strip()
+        if not text:
+            return ""
+        parsed = parse_headword_text(text, effective, profile=profile)
+        if parsed is not None and str(parsed.normalized or "").strip():
+            return str(parsed.normalized).strip()
+        first_line = next(
+            (line.strip() for line in text.splitlines() if line.strip()),
+            "",
+        )
+        return first_line[:64].strip()
+
+    def resolve_candidate(
+        candidate,
+        *,
+        is_large: bool,
+        crop_width: int,
+    ) -> OcrTextChoice | None:
+        if not candidate.ok:
+            return None
+        word = ""
+        confidence = candidate.confidence
+
+        if candidate.engine == "paddle" and candidate.records:
+            from .paddle_headwords import (
+                _single_cjk_from_local_records,
+                group_ocr_records,
+            )
+
+            records = list(candidate.records)
+            if is_large:
+                word, confidence_value, _source_text = _single_cjk_from_local_records(
+                    records,
+                    effective,
+                    profile,
+                    max_left_x=max(
+                        16,
+                        round(max(1, int(crop_width)) * 0.75),
+                    ),
+                )
+                if word:
+                    confidence = float(confidence_value)
+            else:
+                lines = group_ocr_records(
+                    records,
+                    float(
+                        getattr(
+                            effective,
+                            "paddle_line_merge_y_ratio",
+                            0.55,
+                        )
+                        or 0.55
+                    ),
+                )
+                for line in sorted(
+                    lines,
+                    key=lambda value: (
+                        int(value.box[0]),
+                        int(value.box[1]),
+                        -float(value.confidence),
+                    ),
+                ):
+                    word = parsed_or_raw(str(line.text or ""))
+                    if word:
+                        confidence = float(line.confidence)
+                        break
+
+        if not word:
+            word = parsed_or_raw(candidate.text)
+        if not word:
+            return None
+        return OcrTextChoice(
+            engine=candidate.engine,
+            text=str(word).strip(),
+            confidence=confidence,
+        )
+
     for entry in targets:
         original_x, original_y = int(entry.x), int(entry.y)
         crop, is_large = _ordinary_marker_local_crop(
-            canonical, entry, geometry, effective,
+            canonical,
+            entry,
+            geometry,
+            effective,
+            row_metrics=row_metrics,
         )
-        try:
-            records = run_paddle_band(crop, effective, engine=engine)
-        except Exception:
-            stats["failed"] += 1
-            continue
-        if not records:
-            stats["failed"] += 1
-            continue
+        stats["large" if is_large else "regular"] += 1
 
-        word = ""
-        confidence: float | None = None
-        if is_large:
-            stats["large"] += 1
-            word, confidence_value, _source_text = _single_cjk_from_local_records(
-                records,
-                effective,
-                profile,
-                max_left_x=max(16, round(crop.width * 0.62)),
+        psm = (
+            5
+            if str(
+                getattr(effective, "layout_writing_mode", "")
+            ).startswith("vertical")
+            else 7
+        )
+        result = channel.recognize_crop(crop, tesseract_psm=psm)
+        resolved: list[OcrTextChoice] = []
+        for candidate in result.candidates:
+            choice = resolve_candidate(
+                candidate,
+                is_large=is_large,
+                crop_width=int(crop.width),
             )
-            confidence = float(confidence_value) if word else None
-        else:
-            stats["regular"] += 1
-            lines = group_ocr_records(
-                records,
-                float(getattr(effective, "paddle_line_merge_y_ratio", 0.55) or 0.55),
-            )
-            # Prefer a structurally parsable line beginning nearest the crop left.
-            ranked_lines = sorted(
-                lines,
-                key=lambda line: (
-                    int(line.box[0]),
-                    int(line.box[1]),
-                    -float(line.confidence),
-                ),
-            )
-            for line in ranked_lines:
-                parsed = parse_headword_text(
-                    str(line.text or ""),
-                    effective,
-                    profile=profile,
-                )
-                if parsed is not None and str(parsed.normalized or "").strip():
-                    word = str(parsed.normalized).strip()
-                    confidence = float(line.confidence)
-                    break
+            if choice is not None:
+                resolved.append(choice)
 
-            # Geometry has already established that a headword exists. If the
-            # full parser cannot normalize it, use only the leftmost OCR record,
-            # never the whole definition crop.
-            if not word:
-                leftmost = min(
-                    records,
-                    key=lambda record: (
-                        int(record.box[0]),
-                        int(record.box[1]),
-                        -float(record.confidence),
-                    ),
-                )
-                if int(leftmost.box[0]) <= max(16, round(crop.width * 0.25)):
-                    fallback = str(leftmost.text or "").strip()
-                    if fallback and len(fallback) <= 64:
-                        parsed = parse_headword_text(
-                            fallback,
-                            effective,
-                            profile=profile,
-                        )
-                        word = (
-                            str(parsed.normalized).strip()
-                            if parsed is not None and str(parsed.normalized or "").strip()
-                            else fallback
-                        )
-                        confidence = float(leftmost.confidence)
+        selected, _agreed = choose_ocr_text(result.plan, resolved)
+        word = str(selected.text).strip() if selected is not None else ""
+        confidence = selected.confidence if selected is not None else None
 
         if word:
             if effective.ocr_replace:
                 word = process_ocr_text(
-                    word, replace_rules, bool(effective.lowercase_ocr)
+                    word,
+                    replace_rules,
+                    bool(effective.lowercase_ocr),
                 )
             entry.word = str(word).strip()
             entry.confidence = confidence
-            entry.ocr_source = "ordinary_marker:paddle"
-            entry.final_engine = "paddle"
+            engine = str(selected.engine)
+            entry.ocr_source = f"ordinary_marker:{engine}"
+            entry.final_engine = engine
             issue = "ORDINARY_MARKER_TEXT_OCR"
             existing = [
-                part for part in str(entry.issue_type or "").split(",") if part
+                part
+                for part in str(entry.issue_type or "").split(",")
+                if part
             ]
             if issue not in existing:
                 existing.append(issue)
@@ -2721,6 +2599,7 @@ def ocr_existing_entry_words_from_markers(
             raise RuntimeError("普通画线后OCR文字不得修改任何画线坐标")
 
     return ordered, stats
+
 
 def ocr_entries(
     image: Image.Image,
@@ -2753,15 +2632,6 @@ def ocr_entries(
     return results
 
 
-def export_ocred(path: Path, texts: list[str]) -> None:
-    path.write_text("".join(f"{i:03d}|`{text}\n" for i, text in enumerate(texts)), encoding="utf-8")
-
-
-def import_ocred(path: Path) -> list[str]:
-    texts: list[str] = []
-    for line in path.read_text(encoding="utf-8-sig").splitlines():
-        texts.append(line.split("`", 1)[1] if "`" in line else line)
-    return texts
 
 
 def _save_crop(image: Image.Image, output: Path, box: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
@@ -2769,13 +2639,6 @@ def _save_crop(image: Image.Image, output: Path, box: tuple[int, int, int, int])
     output.parent.mkdir(parents=True, exist_ok=True)
     image.crop(box).save(output, "PNG")
     return box
-
-
-def _publish_temp_path(target: Path) -> Path:
-    """Return a same-filesystem temporary path for one eventual atomic publish."""
-    target = Path(target)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    return target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
 
 
 def _stage_text_file(target: Path, text: str, *, encoding: str = "utf-8") -> Path:
@@ -2789,62 +2652,6 @@ def _stage_text_file(target: Path, text: str, *, encoding: str = "utf-8") -> Pat
     except Exception:
         temp.unlink(missing_ok=True)
         raise
-
-
-def _publish_file_transaction(
-    replacements: list[tuple[Path, Path]], *, stale_paths: list[Path] | None = None,
-) -> None:
-    """Publish a page file set together and restore the previous set on failure."""
-    pairs = [(Path(temp), Path(target)) for temp, target in replacements]
-    token = uuid.uuid4().hex
-    old_candidates: list[Path] = []
-    seen: set[str] = set()
-    for path in [*(target for _temp, target in pairs), *(stale_paths or [])]:
-        key = os.fspath(path)
-        if key in seen:
-            continue
-        seen.add(key)
-        old_candidates.append(path)
-
-    backups: list[tuple[Path, Path]] = []
-    published: list[Path] = []
-    preserve_backups = False
-    try:
-        for target in old_candidates:
-            if not target.exists():
-                continue
-            backup = target.with_name(f".{target.name}.{token}.bak")
-            backup.unlink(missing_ok=True)
-            os.replace(target, backup)
-            backups.append((target, backup))
-
-        for temp, target in pairs:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(temp, target)
-            published.append(target)
-    except Exception:
-        for target in reversed(published):
-            target.unlink(missing_ok=True)
-        restore_error: Exception | None = None
-        for target, backup in reversed(backups):
-            if not backup.exists():
-                continue
-            try:
-                os.replace(backup, target)
-            except Exception as exc:
-                restore_error = restore_error or exc
-        if restore_error is not None:
-            preserve_backups = True
-            raise RuntimeError(
-                "切图发布失败，且回滚旧文件时发生错误；已保留隐藏 .bak 恢复副本。"
-            ) from restore_error
-        raise
-    finally:
-        for temp, _target in pairs:
-            temp.unlink(missing_ok=True)
-        if not preserve_backups:
-            for _target, backup in backups:
-                backup.unlink(missing_ok=True)
 
 
 def _stage_crop(
@@ -3026,23 +2833,6 @@ def entry_crop_column_boxes(
         )
         for col in range(len(geometry.column_starts))
     ]
-
-def _normalized_crop_name(text: str) -> str:
-    value = unicodedata.normalize("NFKC", str(text or "")).strip().casefold()
-    value = re.sub(r"\s+", " ", value)
-    # A PPP may already carry a display suffix such as (P1); it still belongs
-    # to the headword before that suffix.
-    value = re.sub(r"\s*\(p\d+\)\s*$", "", value, flags=re.I)
-    return value
-
-
-def polygon_display_name(region: PolygonRegion, index: int) -> str:
-    label = str(region.label or "").strip()
-    fields = label.split("|")
-    if len(fields) >= 3 and fields[1].strip():
-        return fields[1].strip()
-    return label or f"P_{index + 1:02d}"
-
 
 def _point_in_rect(point: tuple[int, int], box: tuple[int, int, int, int]) -> bool:
     x, y = point
@@ -3302,39 +3092,6 @@ def build_page_crop_plan(
     return PageCropPlan(pieces,illustrations,bool(integrate_illustrations))
 
 
-def page_crop_plan_dict(plan: PageCropPlan) -> dict:
-    return {
-        "version": 3,
-        "coordinate_space": SOURCE_COORDINATE_SPACE,
-        "box_format": "source_xyxy",
-        "integrate_illustrations": bool(plan.integrate_illustrations),
-        "entry_pieces": [
-            {
-                "output_index": p.output_index,
-                "entry_ref_index": p.entry_ref_index,
-                "word": p.word,
-                "box": list(p.box),
-                "suffix": p.suffix,
-                "source_mode": p.source_mode,
-                "merge_polygon_indices": list(p.merge_polygon_indices),
-            }
-            for p in plan.entry_pieces
-        ],
-        "illustrations": [
-            {
-                "polygon_index": d.polygon_index,
-                "name": d.name,
-                "associated_entry_index": d.associated_entry_index,
-                "associated_word": d.associated_word,
-                "relation": d.relation,
-                "standalone": d.standalone,
-                "box": list(d.box) if d.box is not None else None,
-            }
-            for d in plan.illustrations
-        ],
-    }
-
-
 def _stage_page_crop_plan(
     root: Path, page_stem: str, plan: PageCropPlan,
 ) -> tuple[Path, Path]:
@@ -3503,25 +3260,6 @@ def split_whole_entries(
     finally:
         image.close()
 
-def append_crop_log(root: Path, records: list[CropRecord]) -> None:
-    """Append crop boxes in original-image pixels with a self-describing header."""
-    if not records:
-        return
-    log = crop_log_path(root)
-    needs_header = not log.exists() or log.stat().st_size == 0
-    with log.open("a", encoding="utf-8") as handle:
-        if needs_header:
-            handle.write(
-                "# coordinate_space=source_image_pixels; "
-                "columns=page,file,source_x,source_y,width,height\n"
-            )
-        for record in records:
-            left, top, right, bottom = record.box
-            handle.write(
-                f"{record.page}\t{record.filename}\t{left}\t{top}\t{right-left}\t{bottom-top}\n"
-            )
-
-
 
 AUTO_ILLUSTRATION_LABEL_TOKEN = "|AUTO_"
 
@@ -3652,112 +3390,148 @@ def is_auto_illustration_region(region: PolygonRegion) -> bool:
     return AUTO_ILLUSTRATION_LABEL_TOKEN in str(region.label or "").upper()
 
 
-def detect_illustration_regions(
-    image_path: Path, settings: AppSettings, *, analysis_column_width: int = 520,
+
+def detect_illustration_regions_from_image(
+    image: Image.Image,
+    settings: AppSettings,
+    *,
+    analysis_column_width: int = 520,
     profile_page_index: int = 0,
 ) -> list[PolygonRegion]:
-    """Detect large non-text illustration-like ink components on a dictionary page.
+    """Detect automatic PPP illustration candidates from an in-memory page.
 
-    The detector deliberately uses only Pillow/NumPy so the feature works in the
-    normal installation.  Detection is performed column-by-column on a reduced
-    image.  A slight 3x3 dilation joins strokes within drawings while the minimum
-    height/area tests reject ordinary text lines and page rules.  Results are
-    rectangular four-point polygons in original-image coordinates, compatible
-    with the existing PPP editor/cropper.
+    This is the single component detector shared by historical path-based
+    PPP auto-detection and optional Layout illustration masking.
     """
-    with Image.open(image_path) as opened:
-        image = normalize_page_rgb(opened)
+    source, effective, analysis_source, geometry = _page_geometry_context(
+        image,
+        settings,
+        int(profile_page_index),
+    )
+    work_image: Image.Image | None = None
     try:
-        source, effective, analysis_source, geometry = _page_geometry_context(
-            image, settings, profile_page_index,
-        )
         work_image = geometry.transform.canonical_image_for_analysis(analysis_source)
-        canonical_width = geometry.transform.canonical_size(source.size)[0]
         source_margin = max(
             2,
-            _source_px(max(0, int(getattr(effective, "illustration_detect_padding", 8)))),
+            _source_px(
+                max(0, int(getattr(effective, "illustration_detect_padding", 8)))
+            ),
         )
         source_margin_right = max(
             source_margin,
-            _source_px(max(0, int(getattr(effective, "illustration_detect_right_padding", 16)))),
+            _source_px(
+                max(
+                    0,
+                    int(getattr(effective, "illustration_detect_right_padding", 16)),
+                )
+            ),
         )
         results: list[PolygonRegion] = []
         for column, start in enumerate(geometry.column_starts):
             width = geometry.column_widths[column]
             base_x0 = max(0, int(start))
             base_x1 = min(work_image.width, int(start + width))
-            # Illustrations frequently extend a little into the inter-column
-            # gutter. The old detector clipped analysis exactly at column_width,
-            # which systematically shortened the right edge. Borrow only the
-            # near half of the gutter so the next text column cannot be swallowed.
             if column + 1 < len(geometry.column_starts):
                 next_start = int(geometry.column_starts[column + 1])
                 free_right = max(0, next_start - base_x1)
-                right_room = min(max(source_margin_right, free_right // 2), max(source_margin_right, round(width * 0.10)))
+                right_room = min(
+                    max(source_margin_right, free_right // 2),
+                    max(source_margin_right, round(width * 0.10)),
+                )
             else:
                 free_right = max(0, work_image.width - base_x1)
-                right_room = min(free_right, max(source_margin_right, round(width * 0.08)))
+                right_room = min(
+                    free_right,
+                    max(source_margin_right, round(width * 0.08)),
+                )
             x0 = base_x0
             x1 = min(work_image.width, base_x1 + max(0, right_room))
-            y0 = max(0, int(geometry.top)); y1 = min(work_image.height, int(geometry.bottom))
+            y0 = max(0, int(geometry.top))
+            y1 = min(work_image.height, int(geometry.bottom))
             if x1 - x0 < 40 or y1 - y0 < 80:
                 continue
+
             crop = work_image.crop((x0, y0, x1, y1)).convert("L")
             try:
                 a_scale = min(1.0, analysis_column_width / max(1, crop.width))
-                aw = max(1, round(crop.width * a_scale)); ah = max(1, round(crop.height * a_scale))
-                small = crop if a_scale == 1.0 else crop.resize((aw, ah), Image.Resampling.BILINEAR)
+                aw = max(1, round(crop.width * a_scale))
+                ah = max(1, round(crop.height * a_scale))
+                small = (
+                    crop
+                    if a_scale == 1.0
+                    else crop.resize((aw, ah), Image.Resampling.BILINEAR)
+                )
                 try:
-                    # Mix adaptive and absolute-dark masks: adaptive catches light
-                    # halftones/line art, absolute-dark keeps strong contours.
                     adaptive = _adaptive_dark_mask(small, 19, 16)
                     arr = np.asarray(small, dtype=np.uint8)
                     dark = np.logical_or(adaptive, arr < 170)
-                    mask_img = Image.fromarray((dark.astype(np.uint8) * 255), mode="L")
+                    mask_img = Image.fromarray(
+                        dark.astype(np.uint8) * 255,
+                        mode="L",
+                    )
                     try:
-                        joined = np.asarray(mask_img.filter(ImageFilter.MaxFilter(3)), dtype=np.uint8) > 0
+                        joined = (
+                            np.asarray(
+                                mask_img.filter(ImageFilter.MaxFilter(3)),
+                                dtype=np.uint8,
+                            )
+                            > 0
+                        )
                     finally:
                         mask_img.close()
+
                     comps = _rle_components(joined)
                     min_h = max(18, round(0.028 * ah))
                     min_w = max(18, round(0.055 * aw))
                     min_bbox_area = max(500, round(0.0022 * aw * ah))
                     candidates: list[tuple[int, int, int, int]] = []
                     for cx0, cy0, cx1, cy1, area in comps:
-                        bw, bh = cx1 - cx0, cy1 - cy0
+                        bw = cx1 - cx0
+                        bh = cy1 - cy0
                         bbox_area = bw * bh
                         if bw < min_w or bh < min_h or bbox_area < min_bbox_area:
                             continue
-                        # Connected occupancy rejects large whitespace boxes, while
-                        # the height threshold rejects normal dictionary text lines.
                         occupancy = area / max(1, bbox_area)
                         if occupancy < 0.035:
                             continue
                         if bw / max(1, bh) > 7.0 and bh < 0.08 * ah:
                             continue
                         candidates.append((cx0, cy0, cx1, cy1))
+
                     gap = max(5, round(0.018 * aw))
                     candidates = _merge_nearby_boxes(candidates, gap)
                     for cx0, cy0, cx1, cy1 in candidates:
-                        bw, bh = cx1 - cx0, cy1 - cy0
+                        bw = cx1 - cx0
+                        bh = cy1 - cy0
                         if bh < min_h or bw < min_w:
                             continue
                         sx0 = x0 + round(cx0 / a_scale) - source_margin
                         sy0 = y0 + round(cy0 / a_scale) - source_margin
                         sx1 = x0 + round(cx1 / a_scale) + source_margin_right
                         sy1 = y0 + round(cy1 / a_scale) + source_margin
-                        sx0 = max(x0, sx0); sy0 = max(y0, sy0)
-                        sx1 = min(x1, sx1); sy1 = min(y1, sy1)
+                        sx0 = max(x0, sx0)
+                        sy0 = max(y0, sy0)
+                        sx1 = min(x1, sx1)
+                        sy1 = min(y1, sy1)
                         if sx1 - sx0 < 8 or sy1 - sy0 < 8:
                             continue
-                        results.append(PolygonRegion("", [(sx0, sy0), (sx1, sy0), (sx1, sy1), (sx0, sy1)]))
+                        results.append(
+                            PolygonRegion(
+                                "",
+                                [
+                                    (sx0, sy0),
+                                    (sx1, sy0),
+                                    (sx1, sy1),
+                                    (sx0, sy1),
+                                ],
+                            )
+                        )
                 finally:
                     if small is not crop:
                         small.close()
             finally:
                 crop.close()
-        # Merge any boxes touching a column boundary only if they truly overlap;
-        # most dictionary illustrations stay within one column, so this is rare.
+
         if geometry.transform.kind == "identity":
             return results
         return [
@@ -3768,10 +3542,42 @@ def detect_illustration_regions(
             for region in results
         ]
     finally:
-        if "work_image" in locals():
-            work_image.close()
-        image.close()
+        if work_image is not None:
+            try:
+                work_image.close()
+            except Exception:
+                pass
+        try:
+            if analysis_source is not source:
+                analysis_source.close()
+        except Exception:
+            pass
+        try:
+            if source is not image:
+                source.close()
+        except Exception:
+            pass
 
+
+def detect_illustration_regions(
+    image_path: Path,
+    settings: AppSettings,
+    *,
+    analysis_column_width: int = 520,
+    profile_page_index: int = 0,
+) -> list[PolygonRegion]:
+    """Historical path API backed by the shared in-memory detector."""
+    with Image.open(Path(image_path)) as opened:
+        image = normalize_page_rgb(opened)
+    try:
+        return detect_illustration_regions_from_image(
+            image,
+            settings,
+            analysis_column_width=int(analysis_column_width),
+            profile_page_index=int(profile_page_index),
+        )
+    finally:
+        image.close()
 
 def detect_illustrations_to_ppp(
     image_path: Path, settings: AppSettings, *, profile_page_index: int = 0,
@@ -4026,13 +3832,6 @@ def split_illustrations(
     finally:
         image.close()
     return IllustrationSplitResult(records, events)
-
-def append_illustration_crop_log(root: Path, events: list[IllustrationCropEvent]) -> None:
-    if not events: return
-    path=qt_root(root)/"_illustration_crop_log.txt"; path.parent.mkdir(parents=True,exist_ok=True)
-    with path.open("a",encoding="utf-8") as handle:
-        for e in events:
-            handle.write(f"{e.page}\tPPP{e.polygon_index:03d}\t{e.name}\t{e.associated_word}\t{e.relation}\t{e.action}\t{e.filename}\n")
 
 
 def resolve_crop_worker_count(configured: int = 0, cpu_count: int | None = None) -> int:

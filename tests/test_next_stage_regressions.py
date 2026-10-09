@@ -293,7 +293,7 @@ def test_ordinary_marker_local_crop_uses_taller_box_for_visual_large_cjk():
 
 def test_ordinary_marker_text_ocr_fills_only_blank_without_moving_lines(monkeypatch):
     import picture_capture.paddle_headwords as ph
-    import picture_capture.entry_classification_runtime as ecr
+    import picture_capture.ocr_channel as ocr_channel
 
     image = Image.new("RGB", (360, 260), "white")
     draw = ImageDraw.Draw(image)
@@ -361,9 +361,9 @@ def test_ordinary_marker_text_ocr_fills_only_blank_without_moving_lines(monkeypa
                 )],
             )
 
-    monkeypatch.setattr(ecr, "OcrChannelSession", FakeChannel)
+    monkeypatch.setattr(ocr_channel, "OcrChannelSession", FakeChannel)
     monkeypatch.setattr(
-        ecr, "choose_ocr_text",
+        ocr_channel, "choose_ocr_text",
         lambda _plan, resolved: (resolved[0] if resolved else None, False),
     )
 
@@ -407,9 +407,14 @@ def test_combined_drawing_automatically_runs_marker_text_ocr_for_blank_rescues()
     assert '"text_filled"' in batch
     assert "普通救漏自动补字" in batch
 
-    current_start = source.index("    def auto_detect_current(")
-    current_end = source.index("    def paddle_detect_current(", current_start)
-    current = source[current_start:current_end]
+    assert "self._detection_controller_for_call().auto_detect_current(" in source
+    controller_source = (
+        Path(inspect.getsourcefile(app_module)).parent
+        / "ui" / "controllers" / "detection.py"
+    ).read_text(encoding="utf-8")
+    current_start = controller_source.index("    def auto_detect_current(")
+    current_end = controller_source.index("    def paddle_detect_current(", current_start)
+    current = controller_source[current_start:current_end]
     assert 'if settings.detection_method == "combined":' in current
     assert "ocr_existing_entry_words_from_markers(" in current
     assert "only_blank=True" in current
@@ -1137,6 +1142,18 @@ def test_settings_center_uses_context_help_units_and_user_facing_modes():
         Path(__file__).resolve().parents[1]
         / "src" / "picture_capture" / "ui" / "settings" / "help.py"
     ).read_text(encoding="utf-8")
+    lifecycle_source = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "picture_capture" / "ui" / "settings" / "lifecycle.py"
+    ).read_text(encoding="utf-8")
+    window_source = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "picture_capture" / "ui" / "settings" / "window.py"
+    ).read_text(encoding="utf-8")
+    crop_source = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "picture_capture" / "ui" / "settings" / "crop.py"
+    ).read_text(encoding="utf-8")
 
     assert '"bottom_y", int' in schema
     assert '"bottom_y": "正文结束 Y"' in schema
@@ -1194,20 +1211,20 @@ def test_settings_center_uses_context_help_units_and_user_facing_modes():
     assert 'justify="left"' in settings
     assert "self._settings_help_body_label = help_body" in settings
     assert 'style="PC.Settings.TNotebook"' in settings
-    assert '"PC.Settings.TNotebook.Tab"' in settings
-    assert 'padding=(13, 7)' in settings
+    assert '"PC.Settings.TNotebook.Tab"' in window_source
+    assert 'padding=(13, 7)' in window_source
     assert "self.transient(parent); self.grab_set()" not in settings
     assert "def select_tab(self, key: str | None)" in settings
     assert '(crop_tab, "切图")' in settings
     assert '"crop": crop_tab' in settings
     assert "def _build_crop_settings_tab(" in settings
-    assert '"general_top_y"' in settings
-    assert '"general_bottom_y"' in settings
-    assert '"entry_left_padding_x"' in settings
-    assert '"entry_right_padding_x"' in settings
-    assert '"integrate_illustrations"' in settings
-    assert '"polygon_margin"' in settings
-    assert '"parallel_workers"' in settings
+    assert '"general_top_y"' in crop_source
+    assert '"general_bottom_y"' in crop_source
+    assert '"entry_left_padding_x"' in crop_source
+    assert '"entry_right_padding_x"' in crop_source
+    assert '"integrate_illustrations"' in crop_source
+    assert '"polygon_margin"' in crop_source
+    assert '"parallel_workers"' in crop_source
     assert "self._save_integrated_crop_settings()" in settings
 
     assert 'text="融合画线+OCR"' in settings
@@ -1219,8 +1236,8 @@ def test_settings_center_uses_context_help_units_and_user_facing_modes():
 
     assert 'text="校验当前设置"' in settings
     assert 'self.bind("<Escape>", lambda _event: self._close_validated())' in settings
-    assert "✓ 已自动保存" in settings
-    assert "⚠ 当前输入暂未保存" in settings
+    assert "✓ 已自动保存" in lifecycle_source
+    assert "⚠ 当前输入暂未保存" in lifecycle_source
 
     # Every Settings Center field/check must have a real help entry; avoid
     # silently falling back to the generic "专家参数" text as the UI grows.
@@ -1251,21 +1268,27 @@ def test_settings_center_uses_context_help_units_and_user_facing_modes():
 
 
 
-def test_settings_center_restores_inline_detailed_parameter_help():
-    source = Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "app.py"
+def test_settings_center_uses_native_compact_right_pane_help():
+    root = Path(__file__).resolve().parents[1]
+    source = root / "src" / "picture_capture" / "app.py"
     text = source.read_text(encoding="utf-8")
+    helper_source = (
+        root / "src" / "picture_capture" / "layout_percent_helpers.py"
+    ).read_text(encoding="utf-8")
     settings_start = text.index("class SettingsDialog")
     settings_end = text.index("class ", settings_start + len("class SettingsDialog"))
     settings = text[settings_start:settings_end]
-    assert "inline_help = ttk.Label" in settings
-    assert "text=self.SETTING_HELP.get(" in settings
-    assert "check_help = ttk.Label" in settings
-    assert "text=self.CHECK_HELP.get(" in settings
-    assert '"analysis_left": "width"' in text
-    assert '"analysis_right": "width"' in text
-    assert '"paddle_header_search_height": "height"' in text
-    assert "def _column_pixels_to_percent(" in text
-    assert "def _column_percent_to_pixels(" in text
+
+    assert "inline_help = ttk.Label" not in settings
+    assert "check_help = ttk.Label" not in settings
+    assert "左侧只保留参数、单位和必要状态" in settings
+    assert "每个参数下方已直接显示详细说明" not in settings
+    assert "show_layout_image=hi" in settings
+    assert '"analysis_left": "width"' in helper_source
+    assert '"analysis_right": "width"' in helper_source
+    assert '"paddle_header_search_height": "height"' in helper_source
+    assert "def _column_pixels_to_percent(" in helper_source
+    assert "def _column_percent_to_pixels(" in helper_source
 
 def test_settings_center_is_reused_without_blocking_main_workspace():
     source = (
@@ -1346,20 +1369,24 @@ def test_project_toolbar_and_profile_scroll_layout_are_wired():
     assert 'text="图片后缀："' not in text
     assert "self.image_suffix_var" not in text
 
-    suffix_choice_start = text.index("    def _choose_new_project_image_suffix(")
-    suffix_choice_end = text.index("\n    def open_project(", suffix_choice_start)
-    suffix_choice = text[suffix_choice_start:suffix_choice_end]
+    controller_source = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "picture_capture" / "ui" / "controllers" / "project.py"
+    ).read_text(encoding="utf-8")
+    suffix_choice_start = controller_source.index("    def choose_new_project_image_suffix(")
+    suffix_choice_end = controller_source.index("\n    def open_project(", suffix_choice_start)
+    suffix_choice = controller_source[suffix_choice_start:suffix_choice_end]
     assert "project_page_images(root)" in suffix_choice
-    assert "if len(suffixes) == 1:" in suffix_choice
     assert "simpledialog.askstring(" in suffix_choice
-    assert "if suffix in counts:" in suffix_choice
-
-    open_start = text.index("    def open_project(self) -> None:")
-    open_end = text.index("\n    def _load_project(", open_start)
-    open_project = text[open_start:open_end]
+    open_start = controller_source.index("    def open_project(self) -> None:")
+    open_project = controller_source[open_start:]
     assert "if not existing_project:" in open_project
-    assert "self._choose_new_project_image_suffix(root)" in open_project
+    assert "self.choose_new_project_image_suffix(root)" in open_project
     assert "if requested_suffix is None:" in open_project
+    assert "def _choose_new_project_image_suffix(" in text
+    assert "self._project_controller_for_call().choose_new_project_image_suffix(root)" in text
+    assert "def open_project(self) -> None:" in text
+    assert "self._project_controller_for_call().open_project()" in text
 
     actions_start = text.index('            parent, "四、画线 / OCR / 插图 / 校对"')
     actions_end = text.index("        postproduction = self._section_frame(", actions_start)
@@ -1380,12 +1407,13 @@ def test_project_toolbar_and_profile_scroll_layout_are_wired():
     ):
         assert tooltip_key in post
 
-    profile_start = text.index("    def _build_profile_tab(")
-    profile_end = text.index("    def _build_profile_choice_labels(", profile_start)
-    profile = text[profile_start:profile_end]
-    assert "self.profile_canvas = profile_canvas" in profile
-    assert "profile_scrollbar" in profile
-    assert 'text="自定义结构名称："' in profile
+    profile_source = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "picture_capture" / "ui" / "settings" / "profile.py"
+    ).read_text(encoding="utf-8")
+    assert "dialog.profile_canvas = profile_canvas" in profile_source
+    assert "profile_scrollbar" in profile_source
+    assert 'text="自定义结构名称："' in profile_source
     assert "ProjectProfileWizard(self, new_project=new_project)" in text
 
 
@@ -1550,8 +1578,8 @@ def test_main_workspace_modern_styles_are_scoped_and_dense():
     assert 'add_field(normal, 0, 0, "正文栏数：", "columns", int)' in text
     assert 'add_field(normal, 0, 0, "分栏数：", "columns", int)' not in text
     assert '"二、显示设置"' in text
-    assert '"三、融合 / OCR画线参数"' in text
-    assert text.index('"二、显示设置"') < text.index('"三、融合 / OCR画线参数"')
+    assert '"三、共享 OCR 通道 / OCR画线"' in text
+    assert text.index('"二、显示设置"') < text.index('"三、共享 OCR 通道 / OCR画线"')
     assert 'text="普通画线设置…"' in text
     assert 'text="显示标尺"' in text
     assert '"ruler_color": tk.StringVar(value=self.settings.ruler_color)' in text
@@ -2365,6 +2393,9 @@ def test_page_template_alternating_ab_side_widths_are_independent():
 def test_main_canvas_percentage_rulers_are_fixed_display_only_overlays():
     root = Path(__file__).resolve().parents[1]
     app = (root / "src" / "picture_capture" / "app.py").read_text(encoding="utf-8")
+    canvas_controller = (
+        root / "src" / "picture_capture" / "ui" / "controllers" / "canvas.py"
+    ).read_text(encoding="utf-8")
     models = (root / "src" / "picture_capture" / "models.py").read_text(encoding="utf-8")
 
     assert "show_rulers: bool = True" in models
@@ -2373,24 +2404,29 @@ def test_main_canvas_percentage_rulers_are_fixed_display_only_overlays():
     assert "ruler_bottom_y_ratio" not in models
     assert "ruler_left_x_ratio" not in models
     assert "ruler_right_x_ratio" not in models
-    assert 'for ruler_id, y in (("top", 0.0), ("bottom", display_height)):' in app
-    assert 'for ruler_id, x in (("left", 0.0), ("right", display_width)):' in app
-    assert "for half_percent in range(201):" in app
-    assert "pct = half_percent * 0.5" in app
-    assert "for value in range(5, 100, 5):" in app
-    assert 'label_x = x - label_gap if ruler_id == "left" else x + label_gap' in app
-    assert 'anchor = "e" if ruler_id == "left" else "w"' in app
+    assert 'for ruler_id, y in (("top", 0.0), ("bottom", display_height)):' in canvas_controller
+    assert 'for ruler_id, x in (("left", 0.0), ("right", display_width)):' in canvas_controller
+    assert "for half_percent in range(201):" in canvas_controller
+    assert "pct = half_percent * 0.5" in canvas_controller
+    assert "for value in range(5, 100, 5):" in canvas_controller
+    assert 'label_x = x - label_gap if ruler_id == "left" else x + label_gap' in canvas_controller
+    assert 'anchor = "e" if ruler_id == "left" else "w"' in canvas_controller
     assert '"ruler_margin": "#f1f3f6"' in app
     assert '"ruler_margin": "#20252b"' in app
-    assert 'tags=("ruler-margin",)' in app
-    assert 'fill=margin_color, outline=""' in app
-    assert "标尺可以帮助版面参数的手动填写。" in app
+    assert 'tags=("ruler-margin",)' in canvas_controller
+    assert 'fill=margin_color, outline=""' in canvas_controller
+    assert "标尺可以帮助版面参数的手动填写。" in canvas_controller
     assert "_drag_ruler_id" not in app
+    assert "_drag_ruler_id" not in canvas_controller
     assert "_ruler_drag_last_canvas" not in app
+    assert "_ruler_drag_last_canvas" not in canvas_controller
     assert "self.canvas.move(tag" not in app
-    assert "build_page_crop_plan" not in app[
-        app.index("    def _draw_percentage_rulers"):
-        app.index("    def redraw(", app.index("    def _draw_percentage_rulers"))
+    assert "build_page_crop_plan" not in canvas_controller[
+        canvas_controller.index("    def draw_percentage_rulers"):
+        canvas_controller.index(
+            "    def ruler_hit_id",
+            canvas_controller.index("    def draw_percentage_rulers"),
+        )
     ]
 
 
@@ -2401,19 +2437,23 @@ def test_layout_percentage_helpers_preserve_pixel_backend_contract():
     assert _layout_percent_to_pixels(image, "column_width", 25.0) == 250
     assert _layout_percent_to_pixels(image, "character_height", 1.5) == 30
 
-    source = Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "app.py"
+    root = Path(__file__).resolve().parents[1]
+    source = root / "src" / "picture_capture" / "app.py"
     text = source.read_text(encoding="utf-8")
-    schema = (Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "ui" / "settings" / "schema.py").read_text(encoding="utf-8")
-    assert '"start_y": "height"' in text
-    assert '"manual_x": "width"' in text
-    assert '"body_indent": "width"' in text
-    assert '"horizontal_tolerance": "width"' in text
+    helper_source = (
+        root / "src" / "picture_capture" / "layout_percent_helpers.py"
+    ).read_text(encoding="utf-8")
+    schema = (root / "src" / "picture_capture" / "ui" / "settings" / "schema.py").read_text(encoding="utf-8")
+    assert '"start_y": "height"' in helper_source
+    assert '"manual_x": "width"' in helper_source
+    assert '"body_indent": "width"' in helper_source
+    assert '"horizontal_tolerance": "width"' in helper_source
     quick_start = text.index("    def _build_quick_settings(")
     quick_end = text.index("\n    def ", quick_start + 10)
     quick = text[quick_start:quick_end]
     for label in ("正文起始Y：", "首栏X：", "单栏宽：", "栏间空："):
         assert label in quick
-    for label in ("单行高：", "行间空：", "正文缩进：", "微调判距："):
+    for label in ("普通字/行高：", "行间空：", "正文缩进：", "微调判距："):
         assert label not in quick
     assert quick.index('"单栏宽："') > quick.index('"首栏X："')
     assert quick.index('"栏间空："') > quick.index('"单栏宽："')
@@ -3357,7 +3397,11 @@ def test_project_profile_wizard_is_the_normal_entry_path():
     source = Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "app.py"
     text = source.read_text(encoding="utf-8")
     assert "ProjectProfileWizard(self, new_project=new_project)" in text
-    assert "launch_profile_setup=not existing_project" in text
+    project_controller_source = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "picture_capture" / "ui" / "controllers" / "project.py"
+    ).read_text(encoding="utf-8")
+    assert "launch_profile_setup=not existing_project" in project_controller_source
 
     profile_source = (
         Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "profile_setup.py"
@@ -3390,7 +3434,8 @@ def test_main_ocr_drawing_defaults_to_cache_reuse_and_paddle_only():
     assert 'self.ocr_refresh_var = tk.StringVar(value="reuse")' in app_text
     assert "使用有效缓存（推荐）" in app_text
     assert "重新OCR（模型/图像改变时）" in app_text
-    assert "默认只启用 PaddleOCR；Tesseract 与 Google Lens 按需手动开启" in guide_text
+    assert "共享 OCR 通道默认只启用 PaddleOCR；Tesseract 与 Google Lens 可同时启用" in guide_text
+    assert "【仅OCR】与【OCR画线】共用这些选择" in guide_text
     assert 'LENS_MODE_LABELS["off"]' in app_text
 
     settings = AppSettings()
@@ -3979,13 +4024,18 @@ def test_round1_blocking_ui_paths_use_background_workers():
     assert "def worker():" in refresh
     assert 'self.app._start_ui_worker(f"environment-center-' in refresh
 
+    page_controller = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "picture_capture" / "ui" / "controllers" / "page.py"
+    ).read_text(encoding="utf-8")
     page_request = text.index("    def _request_page_load(", app_start)
     page_load = text.index("    def load_page(", page_request)
     page_block = text[page_request:page_load]
-    assert "with Image.open(page) as opened:" in page_block
-    assert 'self._start_ui_worker("page-load"' in page_block
+    assert "self.page_controller.request_page_load(" in page_block
+    assert "with Image.open(page) as opened:" in page_controller
+    assert 'app._start_ui_worker("page-load"' in page_controller
     select_start = text.index("    def on_page_select(", app_start)
-    assert "self._request_page_load(index)" in text[select_start:page_request]
+    assert "self.page_controller.on_page_select(_event)" in text[select_start:page_request]
 
     project_start = text.index("    def _load_project(", app_start)
     project_end = text.index("\n    def on_page_select", project_start)
@@ -4012,8 +4062,16 @@ def test_round1_blocking_ui_paths_use_background_workers():
     picdic_start = text.index("    def build_picdic(", app_start)
     picdic_end = text.index("\n    def _order_key", picdic_start)
     picdic_block = text[picdic_start:picdic_end]
-    assert "self._start_batch_task(" in picdic_block
-    assert "should_stop=self._batch_stop_event.is_set" in picdic_block
+    assert "self._export_controller_for_call().build_picdic()" in picdic_block
+
+    export_controller = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "picture_capture" / "ui" / "controllers" / "export.py"
+    ).read_text(encoding="utf-8")
+    controller_start = export_controller.index("    def build_picdic(")
+    controller_block = export_controller[controller_start:]
+    assert "app._start_batch_task(" in controller_block
+    assert "should_stop=app._batch_stop_event.is_set" in controller_block
 
 
 def test_round1_picdic_cancel_is_atomic(tmp_path):
@@ -4043,20 +4101,28 @@ def test_round2_heavy_finalizers_and_review_crops_stay_off_tk():
     root = Path(__file__).resolve().parents[1]
     app_text = (root / "src" / "picture_capture" / "app.py").read_text(encoding="utf-8")
     profile_text = (root / "src" / "picture_capture" / "profile_setup.py").read_text(encoding="utf-8")
+    export_controller_text = (
+        root / "src" / "picture_capture" / "ui" / "controllers" / "export.py"
+    ).read_text(encoding="utf-8")
 
     app_start = app_text.index("class PictureCaptureApp")
-    training_start = app_text.index("    def export_training_package(", app_start)
-    training_end = app_text.index("\n    def show_help_dialog", training_start)
-    training = app_text[training_start:training_end]
+    wrapper_start = app_text.index("    def export_training_package(", app_start)
+    wrapper_end = app_text.index("\n    def show_help_dialog", wrapper_start)
+    wrapper = app_text[wrapper_start:wrapper_end]
+    assert "self._export_controller_for_call().export_training_package()" in wrapper
+
+    training_start = export_controller_text.index("    def export_training_package(")
+    training_end = export_controller_text.index("\n    def build_picdic", training_start)
+    training = export_controller_text[training_start:training_end]
     assert 'items: list[object] = ["__prepare__"]' in training
     assert "context_files[:] = copy_project_context(project.root, staging)" in training
     assert "make_training_zip(" in training
-    assert "should_stop=self._batch_stop_event.is_set" in training
+    assert "should_stop=app._batch_stop_event.is_set" in training
     assert "shutil.rmtree(staging, ignore_errors=True)" in training
     done_start = training.index("        def done(")
     done = training[done_start:]
     assert "shutil.rmtree(staging, ignore_errors=True)" not in done
-    assert 'self._start_ui_worker(' in done
+    assert 'app._start_ui_worker(' in done
 
     layout_start = app_text.index("    def detect_layout_consistency_selected(", app_start)
     layout_end = app_text.index("\n    @staticmethod\n    def _normalize_suffix", layout_start)
@@ -4145,26 +4211,41 @@ def test_round3_long_tail_ui_paths_are_backgrounded_and_snapshotted():
     order_start = text.index("    def check_headword_order(", app_start)
     order_end = text.index("\n    def _show_text_report", order_start)
     order = text[order_start:order_end]
-    all_pages_branch = order[order.index("        if all_pages:"):]
-    assert 'self._start_batch_task(' in all_pages_branch
+    assert "self._review_controller_for_call().check_headword_order(all_pages)" in order
+
+    review_text = (root / "src" / "picture_capture" / "ui" / "controllers" / "review.py").read_text(encoding="utf-8")
+    controller_start = review_text.index("    def check_headword_order(")
+    controller_order = review_text[controller_start:]
+    all_pages_branch = controller_order[controller_order.index("        if all_pages:"):]
+    assert 'app._start_batch_task(' in all_pages_branch
     assert '"所有词头顺序核对"' in all_pages_branch
-    assert 'self._start_ui_worker(' in all_pages_branch
+    assert 'app._start_ui_worker(' in all_pages_branch
     assert '"headword-order-finalize"' in all_pages_branch
     worker_start = all_pages_branch.index("            def worker(")
     worker_done = all_pages_branch.index("            def done(", worker_start)
     worker = all_pages_branch[worker_start:worker_done]
     assert "read_pdic(pdic_path(page))" in worker
-    assert "self.settings" not in worker
+    assert "app.settings" not in worker
     finalize_start = all_pages_branch.index("                def finalize():")
     finalized_start = all_pages_branch.index("                def finalized(", finalize_start)
     finalize = all_pages_branch[finalize_start:finalized_start]
     assert "sorted(sequence" in finalize
 
+    auto_start = text.index("    def auto_detect_current(", app_start)
+    auto_end = text.index("\n    def _detection_controller_for_call", auto_start)
+    auto_wrapper = text[auto_start:auto_end]
+    assert "self._detection_controller_for_call().auto_detect_current(" in auto_wrapper
+
+    detection_text = (
+        root / "src" / "picture_capture" / "ui" / "controllers" / "detection.py"
+    ).read_text(encoding="utf-8")
+    current_start = detection_text.index("    def auto_detect_current(")
+    current_end = detection_text.index("\n    def paddle_detect_current", current_start)
+    current_block = detection_text[current_start:current_end]
+    assert "app._start_batch_task(" in current_block
+
     for name, next_name in (
-        ("auto_detect_current", "paddle_detect_current"),
         ("ocr_current", "export_text"),
-        ("split_lines_current", "split_whole_current"),
-        ("split_whole_current", "_crop_settings_defaults"),
         ("import_legacy_words", "_default_old_new_compare_source"),
     ):
         start = text.index(f"    def {name}(", app_start)
@@ -4174,15 +4255,23 @@ def test_round3_long_tail_ui_paths_are_backgrounded_and_snapshotted():
 
     fill_start = text.index("    def fill_existing_headwords(", app_start)
     fill_end = text.index("\n    def import_legacy_words", fill_start)
-    fill = text[fill_start:fill_end]
-    ensure_start = fill.index("        def ensure_mapping()")
-    worker_start = fill.index("        def worker(", ensure_start)
-    ensure = fill[ensure_start:worker_start]
-    assert "self._word_fill_source_mapping =" not in ensure
-    assert "settings_snapshot = replace(self.settings)" in fill
-    assert "derive_nominal_geometry(width, height, settings_snapshot)" in fill
-    done_start = fill.index("        def done(", worker_start)
-    assert "self._word_fill_source_mapping = mapping" in fill[done_start:]
+    fill_wrapper = text[fill_start:fill_end]
+    assert "self._headword_controller_for_call().fill_existing_headwords()" in fill_wrapper
+
+    headword_text = (
+        root / "src" / "picture_capture" / "ui" / "controllers" / "headword.py"
+    ).read_text(encoding="utf-8")
+    controller_fill_start = headword_text.index("    def fill_existing_headwords(")
+    controller_fill = headword_text[controller_fill_start:]
+    ensure_start = controller_fill.index("        def ensure_mapping()")
+    worker_start = controller_fill.index("        def worker(", ensure_start)
+    ensure = controller_fill[ensure_start:worker_start]
+    assert "app._word_fill_source_mapping =" not in ensure
+    assert "settings_snapshot = replace(app.settings)" in controller_fill
+    assert "derive_nominal_geometry(width, height, settings_snapshot)" in controller_fill
+    assert "app._start_batch_task(" in controller_fill
+    done_start = controller_fill.index("        def done(", worker_start)
+    assert "app._word_fill_source_mapping = mapping" in controller_fill[done_start:]
 
     prefetch_start = review.index("    def _schedule_adjacent_preload(")
     prefetch_end = review.index("\n    def change_page(", prefetch_start)
@@ -4401,19 +4490,29 @@ def test_concurrency_review_workers_use_snapshots_not_live_app_state():
     assert "tesseract_status(executable, language)" in worker
     assert "opencc_runtime_status(retry=True)" in worker
 
-    split_start = app.index("    def batch_split_whole(")
-    split_end = app.index("\n    def repair_pdic_order_selected_scope", split_start)
-    split = app[split_start:split_end]
-    worker = split[split.index("        def worker("):split.index("        def done(", split.index("        def worker("))]
-    assert "self._ppp_read_path" not in worker
+    crop_source = (
+        root / "src" / "picture_capture" / "ui" / "controllers" / "crop.py"
+    ).read_text(encoding="utf-8")
+    split_start = crop_source.index("    def batch_split_whole(")
+    split = crop_source[split_start:]
+    worker = split[
+        split.index("        def worker("):
+        split.index("        def done(", split.index("        def worker("))
+    ]
+    assert "app._ppp_read_path" not in worker
     assert "ppp_read_path_for_image(page)" in worker
 
-    restore_start = app.index("    def restore_from_pdic_backup(")
-    restore_end = app.index("\n    def restore_from_merged_pdic", restore_start)
-    restore = app[restore_start:restore_end]
-    assert "settings_snapshot = replace(self.settings)" in restore
-    worker = restore[restore.index("        def worker("):restore.index("        def done(", restore.index("        def worker("))]
-    assert "self.settings" not in worker
+    export_controller = (
+        root / "src" / "picture_capture" / "ui" / "controllers" / "export.py"
+    ).read_text(encoding="utf-8")
+    restore_start = export_controller.index("    def restore_from_pdic_backup(")
+    restore = export_controller[restore_start:]
+    assert "settings_snapshot = replace(app.settings)" in restore
+    worker = restore[
+        restore.index("        def worker("):
+        restore.index("        def done(", restore.index("        def worker("))
+    ]
+    assert "app.settings" not in worker
     assert "derive_nominal_geometry(width, height, settings_snapshot)" in worker
 
     preview_start = profile.index("    def _refresh_template_preview(")
@@ -4438,6 +4537,9 @@ def test_concurrency_audit_p0_p1_guards_are_present():
     app = (root / "src" / "picture_capture" / "app.py").read_text(encoding="utf-8")
     profile = (root / "src" / "picture_capture" / "profile_setup.py").read_text(encoding="utf-8")
     training = (root / "src" / "picture_capture" / "training_export.py").read_text(encoding="utf-8")
+    export_controller = (
+        root / "src" / "picture_capture" / "ui" / "controllers" / "export.py"
+    ).read_text(encoding="utf-8")
 
     poll_start = app.index("    def _poll_ui_worker_queue(")
     poll_end = app.index("\n    def _configure_main_workspace_styles", poll_start)
@@ -4457,11 +4559,18 @@ def test_concurrency_audit_p0_p1_guards_are_present():
     validate_end = profile.index("\n    def _poll_validation_queue", validate_start)
     assert "if self.parent._batch_active:" in profile[validate_start:validate_end]
 
-    export_start = app.index("    def export_training_package(")
-    export_end = app.index("\n    def show_help_dialog", export_start)
-    export = app[export_start:export_end]
+    wrapper_start = app.index("    def export_training_package(")
+    wrapper_end = app.index("\n    def show_help_dialog", wrapper_start)
+    wrapper = app[wrapper_start:wrapper_end]
+    assert "self._export_controller_for_call().export_training_package()" in wrapper
+
+    export_start = export_controller.index("    def export_training_package(")
+    export_end = export_controller.index("\n    def build_picdic", export_start)
+    export = export_controller[export_start:export_end]
     assert 'startswith("training-cleanup-")' in export
     assert '%Y%m%d_%H%M%S_%f' in export
+    assert "app._start_ui_worker(" in export
+    assert "wait_on_close=True" in export
     assert "uuid.uuid4().hex" in training
 
 
@@ -5669,7 +5778,8 @@ def test_settings_center_avoids_full_hidden_tab_idle_layout_cascade():
     assert "for _canvas in self._settings_canvases.values():" not in tail
     assert "content.bind(" in text
     assert 'cv.configure(scrollregion=cv.bbox("all"))' in text
-    assert "每个参数下方已直接显示详细说明" in text
+    assert "左侧只保留参数、单位和必要状态" in text
+    assert "每个参数下方已直接显示详细说明" not in text
     assert 'pending["job"] = dialog.after(80, refresh)' in help_source
     assert 'pending["job"] = dialog.after_idle(refresh)' not in help_source
 
@@ -5687,4 +5797,3 @@ def test_responsive_help_wrapping_does_not_self_trigger_on_label_configure():
     assert 'label.bind("<Configure>", schedule, add="+")' not in block
     assert "_pc_wrap_cache_key" in block
     assert "_pc_wrap_width" in block
-
