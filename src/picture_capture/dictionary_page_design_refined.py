@@ -356,8 +356,10 @@ def _guard_band_entries(
     existing: list[Entry],
     *,
     page_index: int,
+    ops: base.LayoutPrimitiveOps | None = None,
 ) -> list[Entry]:
     """Recover first/last entry blocks whose ink crosses the logical body edge."""
+    ops = base.current_layout_ops() if ops is None else ops
     reference = max(1.0, float(layout.ordinary_line_height))
     guard = max(4, round(reference * 1.15))
     source = base.normalize_page_rgb(image)
@@ -395,11 +397,11 @@ def _guard_band_entries(
             if family is not None
             else None
         )
-        runs = base._line_runs(strip, reference)
+        runs = ops.line_runs(strip, reference)
         previous_end = 0
         features: list[tuple[base.LayoutLine, int, int]] = []
         for y0, y1 in runs:
-            line = base._line_feature(
+            line = ops.line_feature(
                 column.index, strip, y0, y1, reference, previous_end,
             )
             previous_end = max(previous_end, y1)
@@ -517,9 +519,13 @@ def detect_entries_from_page_design(
     *,
     page_index: int = 0,
     page_sections: list[Any] | None = None,
+    ops: base.LayoutPrimitiveOps | None = None,
 ) -> base.LayoutDetectionResult:
     """Infer page design, refine indent families, then derive boundaries."""
-    layout = base.infer_dictionary_page_layout(image, settings, page_index=page_index)
+    layout = base.infer_dictionary_page_layout(
+        image, settings, page_index=page_index,
+        **({"ops": ops} if ops is not None else {}),
+    )
     family = refine_indent_semantics(layout)
     if not layout.reliable:
         return base.LayoutDetectionResult(entries=[], layout=layout)
@@ -527,6 +533,7 @@ def detect_entries_from_page_design(
     entries = base.infer_entry_boundaries(layout, page_sections=page_sections)
     entries.extend(_guard_band_entries(
         image, settings, layout, family, entries, page_index=page_index,
+        **({"ops": ops} if ops is not None else {}),
     ))
     entries = _deduplicate_reading_order(layout, entries)
     if family is None:

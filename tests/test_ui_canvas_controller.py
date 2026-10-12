@@ -205,8 +205,8 @@ def test_ruler_visibility_drawing_and_hit_testing_preserve_page_edge_semantics()
     assert controller.ruler_hit_id(500, 500) is None
 
     app.hide_var.set(True)
-    assert controller.rulers_visible() is False
-    assert controller.ruler_hit_id(0, 0) is None
+    assert controller.rulers_visible() is True
+    assert controller.ruler_hit_id(0, 0) in {"left", "top"}
 
 
 def test_ruler_hint_hide_and_cursor_guides_keep_cleanup_contracts() -> None:
@@ -272,11 +272,12 @@ def test_zoom_text_and_fit_operations_preserve_clamps_and_view_reset() -> None:
     assert app.view_zoom_var.get() == "8%"
 
     controller.fit_page_width()
-    assert app.view_scale == 1.0
+    # A 1024px viewport displays a 1000px image at 102.4%.
+    assert app.view_scale == 1.024
     assert app.canvas.xmoves == [0.0]
 
     controller.fit_page_height()
-    assert app.view_scale == 0.4
+    assert app.view_scale == 0.412
     assert app.canvas.ymoves == [0.0]
     assert app.update_idle_calls == 2
 
@@ -353,3 +354,14 @@ def test_canvas_controller_wiring_keeps_picture_capture_app_compatibility_method
         assert f"def {app_method}(" in app
         assert f"self._canvas_controller_for_call().{controller_method}" in app
         assert f"def {controller_method}(" in controller
+
+
+def test_fit_width_and_height_use_full_canvas_extent() -> None:
+    app = _App()
+    controller = CanvasController(app)
+    controller.fit_page_width()
+    assert app.view_scale == 1.024
+    assert app.canvas.xmoves[-1] == 0.0
+    controller.fit_page_height()
+    assert app.view_scale == 0.412
+    assert app.canvas.ymoves[-1] == 0.0

@@ -41,13 +41,13 @@ def is_project_cover_image(path: Path) -> bool:
     )
 
 
-def project_cover_path(root: Path) -> Path | None:
+def project_cover_path(root: Path, *, candidates: tuple[Path, ...] | None = None) -> Path | None:
     """Find the preferred project cover without treating it as a scanned page."""
     root = Path(root)
     # _cover.* is the simple current convention. _project_cover.* remains a
     # compatibility fallback for projects that used the earlier name.
     try:
-        items = tuple(root.iterdir())
+        items = candidates if candidates is not None else tuple(root.iterdir())
     except OSError:
         return None
     for stem in PROJECT_COVER_STEMS:
@@ -65,12 +65,12 @@ def project_cover_path(root: Path) -> Path | None:
     return None
 
 
-def project_page_images(root: Path) -> list[Path]:
+def project_page_images(root: Path, *, candidates: tuple[Path, ...] | None = None) -> list[Path]:
     """Return actual scanned pages, excluding the reserved project cover."""
     root = Path(root)
     try:
         pages = [
-            path for path in root.iterdir()
+            path for path in (candidates if candidates is not None else root.iterdir())
             if (
                 path.is_file()
                 and path.suffix.lower() in IMAGE_EXTENSIONS
@@ -228,10 +228,10 @@ class AppSettings(metaclass=_AppSettingsMeta):
     # VB.NET NumericUpDown10: separator analysis width = column_width / value * 0.98.
     ordinary_right_divisor: float = 1.0
     horizontal_tolerance: int = 13
-    marker_height: int = 2
+    marker_height: int = 5
     guide_width: int = 2
-    guide_opacity: float = 40.0
-    headword_marker_opacity: float = 40.0
+    guide_opacity: float = 60.0
+    headword_marker_opacity: float = 60.0
     # Main overlay colours: headword markers stay red; other structural lines use blue.
     guide_color: str = "#1976d2"
     page_section_color: str = "#1976d2"
@@ -243,7 +243,7 @@ class AppSettings(metaclass=_AppSettingsMeta):
     illustration_outline_color: str = "#1976d2"
     illustration_outline_width: int = 2
     illustration_fill_color: str = "#ffe66d"
-    illustration_fill_opacity: float = 40.0
+    illustration_fill_opacity: float = 60.0
     illustration_label_border_color: str = "#1976d2"
     illustration_label_border_width: int = 2
     illustration_label_fill_color: str = "#e6e6e6"
@@ -274,6 +274,14 @@ class AppSettings(metaclass=_AppSettingsMeta):
     # because classic dictionary illustrations often extend into the gutter.
     illustration_detect_padding: int = 8
     illustration_detect_right_padding: int = 16
+    illustration_detect_gray_threshold: int = 170
+    illustration_detect_parallel_workers: int = 0  # 0=automatic; 1=sequential
+    # Retained only for loading older project settings; size filtering now uses dimensions.
+    illustration_detect_min_area_percent: float = 0.22
+    illustration_detect_min_width: float = 5.5
+    illustration_detect_min_height: float = 2.8
+    illustration_detect_size_unit: str = "%"
+    illustration_detect_min_occupancy_percent: float = 3.5
     white_threshold_high: int = 999
     row_step_multiplier: float = 1.2
     whitespace_adjustment: int = 2
@@ -327,10 +335,17 @@ class AppSettings(metaclass=_AppSettingsMeta):
     preprocess_export_align_y: str = "top"
     # Overlay editor presentation at 100% page scale. The page zoom multiplies
     # the base font, so text boxes zoom together with the scanned page.
+    show_main_entry_labels: bool = True
     main_entry_font_family: str = "自动（系统推荐）"
     main_entry_font_size: int = 16
     main_entry_font_bold: bool = False
     main_entry_font_italic: bool = False
+    # Independent presentation for inline word / image-name labels in crop preview.
+    crop_preview_font_family: str = "自动（系统推荐）"
+    crop_preview_font_size: int = 16
+    crop_preview_font_bold: bool = False
+    crop_preview_font_italic: bool = False
+    crop_preview_follow_zoom: bool = True
     main_entry_width_chars: int = 18
     main_entry_x_ratio: float = 0.66
     main_entry_follow_zoom: bool = True
@@ -368,6 +383,9 @@ class AppSettings(metaclass=_AppSettingsMeta):
     # Review crop height for ordinary (non-single-CJK) entries. 0 keeps the
     # automatic value: character_height + row_padding.
     review_regular_crop_height: int = 0
+    # Height multiplier for the fixed active-word preview. It extends down
+    # from the exact same top Y as the ordinary proofreading row crop.
+    review_extended_crop_height_multiplier: float = 2.5
     # While the proofreading window is open, keep the main canvas visually
     # quiet by default. These switches let users restore either OCR aid.
     review_main_show_ocr_choices: bool = False

@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import tempfile
+import time
 
 from .models import project_cover_path, project_page_images
 from .project_storage import settings_path
@@ -24,7 +26,15 @@ def load_recent_projects(path: Path | None = None) -> list[dict[str, object]]:
         try:
             value = json.loads(candidate.read_text(encoding="utf-8"))
             if isinstance(value, list):
-                return [row for row in value if isinstance(row, dict) and row.get("path")]
+                rows = [dict(row) for row in value if isinstance(row, dict) and row.get("path")]
+                # One tiny index read; no scan-directory inventory before first paint.
+                from .project_center_metadata_cache import cached_details, read_index
+                index = read_index()
+                for row in rows:
+                    cached = cached_details(Path(str(row["path"])).expanduser(), index)
+                    if cached is not None:
+                        row["card_cache"] = {"version": 1, **cached}
+                return sorted(rows, key=lambda row: not bool(row.get("pinned", False)))
         except (OSError, ValueError, TypeError):
             continue
     return []
@@ -33,9 +43,29 @@ def load_recent_projects(path: Path | None = None) -> list[dict[str, object]]:
 def save_recent_projects(rows: list[dict[str, object]], path: Path | None = None) -> None:
     target = path or default_recent_projects_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    temp = target.with_suffix(".tmp")
-    temp.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(temp, target)
+    temp: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=target.parent,
+            prefix=f".{target.name}.", suffix=".tmp", delete=False,
+        ) as handle:
+            temp = Path(handle.name)
+            json.dump([{k: v for k, v in row.items() if k != "card_cache"} for row in rows], handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        for attempt in range(5):
+            try:
+                os.replace(temp, target)
+                break
+            except PermissionError:
+                # On Windows, competing writers can briefly lock the destination
+                # during replacement. Never retry other I/O errors indefinitely.
+                if attempt == 4:
+                    raise
+                time.sleep(0.025 * (attempt + 1))
+    finally:
+        if temp is not None:
+            temp.unlink(missing_ok=True)
 
 
 def touch_recent_project(
@@ -54,6 +84,7 @@ def touch_recent_project(
             existing = dict(row)
         else:
             remaining.append(row)
+    existing.pop("card_cache", None)  # transient view data belongs in the separate metadata index
     row: dict[str, object] = {
         **existing,
         "name": resolved.name,
@@ -69,10 +100,28 @@ def touch_recent_project(
     return rows
 
 
+def set_recent_project_pinned(
+    root: Path, pinned: bool, path: Path | None = None,
+) -> list[dict[str, object]]:
+    """Keep pinned projects above other recent entries without deleting data."""
+    resolved = Path(root).expanduser().resolve()
+    rows = load_recent_projects(path)
+    for row in rows:
+        if Path(str(row.get("path", ""))).expanduser() == resolved:
+            row["pinned"] = bool(pinned)
+    rows.sort(key=lambda row: not bool(row.get("pinned", False)))
+    for row in rows:
+        row.pop("card_cache", None)
+    save_recent_projects(rows, path)
+    return rows
+
+
 def remove_recent_project(root: Path, path: Path | None = None) -> list[dict[str, object]]:
     """Remove only the registry row. No project path is ever unlinked."""
     resolved = root.expanduser().resolve()
     rows = [row for row in load_recent_projects(path) if Path(str(row["path"])).expanduser() != resolved]
+    for row in rows:
+        row.pop("card_cache", None)
     save_recent_projects(rows, path)
     return rows
 
@@ -88,6 +137,48 @@ def _display_recent_timestamp(value: object) -> str:
         return text[:16] if len(text) >= 16 else text
 
 
+def recent_project_stub_details(row: dict[str, object]) -> dict[str, str | int | bool]:
+    """Render an immediate card from the user registry, without touching disk."""
+    root = Path(str(row.get("path") or "")).expanduser()
+    last_page = str(row.get("last_page") or "").strip()
+    try:
+        index = int(row.get("last_page_index")) if row.get("last_page_index") is not None else -1
+    except (TypeError, ValueError, OverflowError):
+        index = -1
+    cached = row.get("card_cache")
+    if isinstance(cached, dict) and cached.get("version") == 1:
+        detail = {
+            key: cached[key] for key in (
+                "full_name", "abbreviation", "image_count", "last_edited",
+                "cover_path", "preview_path", "cover_source",
+            ) if key in cached
+        }
+    else:
+        detail = {}
+    result = {
+        **detail,
+        "full_name": str(detail.get("full_name") or row.get("name") or root.name),
+        "abbreviation": str(detail.get("abbreviation") or ""),
+        "image_count": int(detail.get("image_count") or 0),
+        "last_edited": str(detail.get("last_edited") or _display_recent_timestamp(row.get("opened_at"))),
+        "path": str(root),
+        "exists": True,  # Unknown until filesystem metadata is loaded.
+        "checking": True,
+        "last_page": last_page,
+        "last_page_index": index,
+        "resume_text": last_page or "—",
+        "position_text": last_page or "—",
+        "cover_path": str(detail.get("cover_path") or ""),
+        "preview_path": str(detail.get("preview_path") or ""),
+        "cover_source": str(detail.get("cover_source") or "none"),
+    }
+    count = int(result["image_count"])
+    if count and index >= 0:
+        result["position_text"] = f"第 {min(count, index + 1):,} / {count:,} 页"
+    result["checking"] = not bool(detail)
+    return result
+
+
 def recent_project_details(row: dict[str, object]) -> dict[str, str | int | bool]:
     """Read display metadata without initializing or modifying the project."""
     root = Path(str(row.get("path") or "")).expanduser()
@@ -96,6 +187,19 @@ def recent_project_details(row: dict[str, object]) -> dict[str, str | int | bool
         last_page_index = int(row.get("last_page_index")) if row.get("last_page_index") is not None else -1
     except (TypeError, ValueError):
         last_page_index = -1
+    from .project_center_metadata_cache import cached_details
+    cached = cached_details(root)
+    if cached is not None:
+        count = int(cached.get("image_count") or 0)
+        position = (
+            f"第 {min(count, last_page_index + 1):,} / {count:,} 页"
+            if count and last_page_index >= 0 else (last_page or "—")
+        )
+        return {
+            **cached, "path": str(root), "exists": True,
+            "last_page": last_page, "last_page_index": last_page_index,
+            "resume_text": last_page or "—", "position_text": position,
+        }
     details: dict[str, str | int | bool] = {
         "full_name": str(row.get("name") or root.name),
         "abbreviation": "",
@@ -111,12 +215,37 @@ def recent_project_details(row: dict[str, object]) -> dict[str, str | int | bool
         "preview_path": "",
         "cover_source": "none",
     }
-    if not root.is_dir():
+    if not details["exists"]:
         return details
+    # Match the same selected image format used by ProjectState on opening.
+    # Counting every supported image in mixed TIFF/PNG/JPG directories gives
+    # misleading page totals and incorrect resume-page denominators.
+    project_settings = settings_path(root)
+    raw: dict[str, object] = {}
+    if project_settings.is_file():
+        try:
+            loaded = json.loads(project_settings.read_text(encoding="utf-8-sig"))
+            if isinstance(loaded, dict):
+                raw = loaded
+        except (OSError, ValueError, TypeError):
+            pass
+    details["full_name"] = str(raw.get("dictionary_full_name") or details["full_name"])
+    details["abbreviation"] = str(raw.get("dictionary_abbreviation") or "")
+    preferred_suffix = str(raw.get("image_suffix") or "").lower().strip()
+    if preferred_suffix and not preferred_suffix.startswith("."):
+        preferred_suffix = "." + preferred_suffix
     try:
-        pages = project_page_images(root)
+        inventory = tuple(root.iterdir())
+        all_pages = project_page_images(root, candidates=inventory)
+        if all_pages:
+            chosen_suffix = preferred_suffix if any(
+                page.suffix.lower() == preferred_suffix for page in all_pages
+            ) else all_pages[0].suffix.lower()
+            pages = [page for page in all_pages if page.suffix.lower() == chosen_suffix]
+        else:
+            pages = []
         details["image_count"] = len(pages)
-        cover = project_cover_path(root)
+        cover = project_cover_path(root, candidates=inventory)
         if cover is not None:
             details["cover_path"] = str(cover)
             details["preview_path"] = str(cover)
@@ -124,7 +253,7 @@ def recent_project_details(row: dict[str, object]) -> dict[str, str | int | bool
         elif pages:
             details["preview_path"] = str(pages[0])
             details["cover_source"] = "first_page"
-        image_count = int(details["image_count"])
+        image_count = len(pages)
         if last_page_index >= 0 and image_count > 0:
             page_number = min(image_count, last_page_index + 1)
             details["position_text"] = f"第 {page_number:,} / {image_count:,} 页"
@@ -133,21 +262,20 @@ def recent_project_details(row: dict[str, object]) -> dict[str, str | int | bool
     except OSError:
         details["exists"] = False
         return details
-    project_settings = settings_path(root)
-    if project_settings.is_file():
-        try:
-            raw = json.loads(project_settings.read_text(encoding="utf-8-sig"))
-            if isinstance(raw, dict):
-                details["full_name"] = str(raw.get("dictionary_full_name") or details["full_name"])
-                details["abbreviation"] = str(raw.get("dictionary_abbreviation") or "")
-        except (OSError, ValueError, TypeError):
-            pass
     try:
         candidates = [root.stat().st_mtime]
     except OSError:
         return details
     metadata = project_settings.parent
-    if metadata.is_dir():
+    if metadata == root:
+        # Legacy projects store scans beside settings. Iterating/stat-ing every
+        # high-volume scan to compute a card timestamp is unnecessarily slow.
+        try:
+            if project_settings.is_file():
+                candidates.append(project_settings.stat().st_mtime)
+        except OSError:
+            pass
+    elif metadata.is_dir():
         try:
             candidates.extend(item.stat().st_mtime for item in metadata.iterdir() if item.is_file())
         except OSError:

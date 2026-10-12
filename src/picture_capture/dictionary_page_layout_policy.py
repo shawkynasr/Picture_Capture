@@ -31,6 +31,7 @@ from . import dictionary_page_design_refined as refined
 from .layout_detection import analysis_ink_mask, LayoutEstimate
 from .layout_column_drift import finalize_layout_column_drift
 from .models import AppSettings
+from .layout_parameter_evidence import row_padding_is_measured
 from .page_x_registration import register_page_manual_x
 
 
@@ -67,6 +68,7 @@ def resolve_page_layout_policy(
     settings: AppSettings,
     *,
     page_index: int = 0,
+    ops: base.LayoutPrimitiveOps | None = None,
 ) -> tuple[AppSettings, LayoutEstimate | None, dict[str, int]]:
     """Resolve the master/per-field layout policy for one page.
 
@@ -107,17 +109,27 @@ def resolve_page_layout_policy(
     for field, switch in AUTO_LAYOUT_FIELDS:
         if field == "manual_x" or not bool(getattr(current, switch, False)):
             continue
+        if field == "row_padding" and not row_padding_is_measured(estimate):
+            # OCR-free projection writes a constant 1px row-padding guess;
+            # an auto checkbox cannot turn a placeholder into observed leading.
+            continue
         value = int(getattr(estimate, field))
         setattr(current, field, value)
         applied[field] = value
 
     if bool(getattr(current, "ordinary_auto_manual_x", False)):
-        registration = register_page_manual_x(canonical, current, estimate)
+        registration = register_page_manual_x(
+            canonical, current, estimate, **({"ops": ops} if ops is not None else {})
+        )
         current.manual_x = int(registration.value)
         applied["manual_x"] = int(registration.value)
 
     current.manual_columns = False
     return current, estimate, applied
+
+
+# Stable raw entry point: the legacy installer may wrap the public policy name.
+_RAW_RESOLVE_PAGE_LAYOUT_POLICY = resolve_page_layout_policy
 
 
 def _column_offsets(settings: AppSettings, count: int) -> list[int]:
@@ -174,11 +186,16 @@ def infer_dictionary_page_layout(
     settings: AppSettings,
     *,
     page_index: int = 0,
+    ops: base.LayoutPrimitiveOps | None = None,
+    policy_resolver: Any = None,
 ) -> tuple[base.DictionaryPageLayout, AppSettings, dict[str, int]]:
     """Infer one page instance while respecting project fixed/auto field policy."""
-    page_settings, estimate, applied = resolve_page_layout_policy(
-        image, settings, page_index=page_index
+    resolver = resolve_page_layout_policy if policy_resolver is None else policy_resolver
+    page_settings, estimate, applied = resolver(
+        image, settings, page_index=page_index,
+        **({"ops": ops} if ops is not None else {}),
     )
+    resolved_ops = base.current_layout_ops() if ops is None else ops
     source, canonical, transform, effective = base._analysis_page(
         image, page_settings, page_index
     )
@@ -218,7 +235,7 @@ def infer_dictionary_page_layout(
                 left:min(canonical.width, left + base._leading_width(column_width, scale)),
             ]
             strips.append(strip)
-            runs.append(base._line_runs(strip, scale))
+            runs.append(resolved_ops.line_runs(strip, scale))
         return strips, runs
 
     # First infer line scale without accepting projection_bottom as a hard crop.
@@ -251,6 +268,15 @@ def infer_dictionary_page_layout(
     strips, raw_runs = column_strips(reference, bottom)
 
     indent_type = base._indent_type(page_settings)
+    # Keep policy-aware PageDesign in sync with physical projection's accepted
+    # 0.26–1.90× row band. The raw base PageDesign path already uses this
+    # contract; previously the policy wrapper silently retained 0.45–1.55×,
+    # losing the same XDHYCD rows in the actual per-page automatic path.
+    physical_projection = (
+        getattr(resolved_ops.line_runs, "__name__", "") == "projection_line_runs"
+    )
+    min_height_ratio = 0.26 if physical_projection else 0.45
+    max_height_ratio = 1.90 if physical_projection else 1.55
     columns: list[base.ColumnDesign] = []
     for index, (left, right, gutter_after, strip, runs) in enumerate(
         zip(starts, rights, gutters, strips, raw_runs)
@@ -258,12 +284,15 @@ def infer_dictionary_page_layout(
         column = base.ColumnDesign(index, left, right, gutter_after)
         previous_end = 0
         for y0, y1 in runs:
-            line = base._line_feature(index, strip, y0, y1, reference, previous_end)
+            line = resolved_ops.line_feature(index, strip, y0, y1, reference, previous_end)
             previous_end = max(previous_end, y1)
-            if line is not None and reference * 0.45 <= line.height <= reference * 1.55:
+            if (
+                line is not None
+                and reference * min_height_ratio <= line.height <= reference * max_height_ratio
+            ):
                 column.lines.append(line)
-        column.indent_modes = base._indent_modes(column.lines, reference)
-        base._assign_indent_semantics(column, indent_type, reference)
+        column.indent_modes = resolved_ops.indent_modes(column.lines, reference)
+        resolved_ops.assign_indent_semantics(column, indent_type, reference)
         columns.append(column)
 
     # Preserve the base sparse-lane transfer.
@@ -370,8 +399,13 @@ def infer_dictionary_page_layout(
         layout,
         page_index=int(page_index),
         page_ink=page_ink,
+        **({"ops": ops} if ops is not None else {}),
     )
     return layout, page_settings, applied
+
+
+# Stable raw inference entry point for explicit composed policy consumers.
+_RAW_INFER_DICTIONARY_PAGE_LAYOUT = infer_dictionary_page_layout
 
 
 def detect_entries_from_page_design(
@@ -380,10 +414,12 @@ def detect_entries_from_page_design(
     *,
     page_index: int = 0,
     page_sections: list[Any] | None = None,
+    ops: base.LayoutPrimitiveOps | None = None,
 ) -> base.LayoutDetectionResult:
     """Policy-aware equivalent of the refined page-design detector."""
     layout, page_settings, applied = infer_dictionary_page_layout(
-        image, settings, page_index=page_index
+        image, settings, page_index=page_index,
+        **({"ops": ops} if ops is not None else {}),
     )
     family = refined.refine_indent_semantics(layout)
     if not layout.reliable:
@@ -397,6 +433,7 @@ def detect_entries_from_page_design(
         family,
         entries,
         page_index=page_index,
+        **({"ops": ops} if ops is not None else {}),
     ))
     entries = refined._deduplicate_reading_order(layout, entries)
     if family is None:

@@ -3,9 +3,6 @@ from __future__ import annotations
 """Static proofreading UI helpers for entry regular/oversized classification."""
 
 from typing import Any
-import tkinter as tk
-from tkinter import ttk
-
 from .entry_classification import (
     get_entry_classification,
     set_entry_scale_manual,
@@ -60,7 +57,10 @@ def _persist(window: Any) -> None:
 
 
 def sync_review_entry_classification(window: Any) -> None:
-    """Synchronize the manual selector with the active Entry classification."""
+    """Synchronize optional classification fields, not preview widgets.
+
+    ReviewWindow owns the sole pinned preview via _update_active_crop_preview.
+    """
     entry = _entry_for_active(window)
     var = getattr(window, "entry_scale_classification_var", None)
     source_var = getattr(window, "entry_source_classification_var", None)
@@ -109,54 +109,6 @@ def set_review_entry_classification_shortcut(window: Any, label: str) -> str:
     return "break"
 
 
-def initialize_review_entry_classification(window: Any) -> None:
-    """Add the manual Entry classification control to one ReviewWindow."""
-    if getattr(window, "entry_classification_frame", None) is not None:
-        return
-
-    window.entry_scale_classification_var = tk.StringVar(value="自动")
-    window.entry_source_classification_var = tk.StringVar(value="来源：—")
-    frame = ttk.Frame(window, padding=(6, 3))
-    frame.place(relx=1.0, x=-14, y=36, anchor="ne")
-    ttk.Label(frame, text="词条类型：").pack(side="left")
-    combo = ttk.Combobox(
-        frame,
-        textvariable=window.entry_scale_classification_var,
-        values=("自动", "普通词条", "大字头"),
-        state="readonly",
-        width=9,
-    )
-    combo.pack(side="left", padx=(0, 8))
-    combo.bind(
-        "<<ComboboxSelected>>",
-        lambda event: change_review_entry_classification(window, event),
-    )
-    ttk.Label(
-        frame,
-        textvariable=window.entry_source_classification_var,
-    ).pack(side="left")
-    window.entry_scale_classification_combo = combo
-    window.entry_classification_frame = frame
-
-    # Fast manual corrections while proofreading.
-    window.bind(
-        "<Control-Alt-Key-0>",
-        lambda _event: set_review_entry_classification_shortcut(window, "自动"),
-        add="+",
-    )
-    window.bind(
-        "<Control-Alt-Key-1>",
-        lambda _event: set_review_entry_classification_shortcut(window, "普通词条"),
-        add="+",
-    )
-    window.bind(
-        "<Control-Alt-Key-2>",
-        lambda _event: set_review_entry_classification_shortcut(window, "大字头"),
-        add="+",
-    )
-    sync_review_entry_classification(window)
-
-
 def install_review_entry_classification(app_module: Any) -> None:
     """Compatibility no-op; Review classification wiring is static."""
     _ = app_module
@@ -164,7 +116,6 @@ def install_review_entry_classification(app_module: Any) -> None:
 
 __all__ = [
     "change_review_entry_classification",
-    "initialize_review_entry_classification",
     "install_review_entry_classification",
     "set_review_entry_classification_shortcut",
     "sync_review_entry_classification",

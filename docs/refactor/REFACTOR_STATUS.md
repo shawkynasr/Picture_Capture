@@ -2666,3 +2666,166 @@ The user has authorized faster continuous progression through confirmed-safe ref
 Continue across related low-risk changes once contracts and focused tests are clear. Use checkpoints at phase milestones, material compatibility-boundary changes, plan changes, merge/finalization boundaries, or when recovery state would otherwise become ambiguous.
 
 Stop production writes for unexplained behavior/test/CI failure, public/file-format compatibility uncertainty, concurrent architecture work, checkpoint mismatch, materially large cross-core redesign, or irreversible compatibility deletion whose impact cannot be established.
+
+
+## Phase 13B2 — explicit Layout ops propagation (CI green; merge gate)
+
+- Work in progress: **true** — PR #394 is open as a draft.
+- Current branch: `phase13b2-layout-ops-propagation`, based on main
+  `1cb913953b84d2c0882f81fb56267c678c9fab8a`.
+- Modified `page_x_registration.py` to accept optional ops at page-X
+  registration and line-family candidate boundaries; four primitive calls use
+  the resolved ops object.
+- Modified `layout_column_drift.py` to accept optional ops through the
+  finalizer and remeasurement path; indent mode/role operations use those ops.
+- Kept default downstream invocations keyword-free for legacy patched
+  stubs; explicit `ops=` calls are forwarded unchanged.
+- Added `tests/test_phase13b2_layout_ops.py` for custom-callback propagation.
+- Verification: local pytest **not run** (execution container could not resolve
+  github.com for clone). PR CI #2367 passed on Ubuntu, Windows and macOS,
+  including pytest, GUI smoke, compatibility runner, compile and wheel build.
+  PR review submissions/threads were empty and diff inspected.
+- Next safe action: finish PR #394 merge gate, verify post-merge CI and then
+  record the merge SHA in a separate checkpoint.
+  After closing 13B2, proceed to 13B3. Do not start 13C yet.
+
+
+## Phase 13B final gate — pending CI and merge
+
+Primitive-ops dependency plumbing is complete through the planned internal paths:
+- 13B1: immutable `LayoutPrimitiveOps`, `RAW_LAYOUT_OPS`, and temporary
+  `current_layout_ops()` compatibility snapshot (PR #392);
+- 13B2: page-X registration and column-drift propagation (PR #394);
+- 13B3a: refined guard-band line/feature extraction (PR #395);
+- 13B3b: policy inference, Profile-anchor wrapper forwarding, and downstream
+  explicit-ops propagation (PR #396).
+
+All four implementation PRs were merged after their three-platform CI passed.
+Historical installers and raw policy/Profile behavior remain intentionally
+unchanged. The final-gate PR adds AST-based architecture regression tests
+rejecting direct `base._line_runs`, `base._line_feature`, `base._indent_modes`,
+and `base._assign_indent_semantics` reads in migrated consumer modules.
+It also verifies optional `ops` coverage and the raw-vs-current snapshot.
+
+**Work in progress: true** until the final-gate PR passes full CI and merges.
+Do not start Phase 13C until this gate is green and the merge is recorded.
+Phase 13C must characterize explicitly composed physical primitives against the
+historically installed robust -> physical runtime, without removing installers.
+
+
+## Phase 13C — explicit Physical Layout primitive composition (complete)
+
+- PR #398, merge `c0e7367512ff7aa8fb0b86c03ceb229b9954a996`: extracted
+  `compose_robust_line_feature(original)` while preserving installer behavior.
+- PR #399, merge `7cd38cacebd5c33c0fb47b1df691271cee6aa982`: introduced
+  `compose_physical_line_feature(inner)` and
+  `explicit_physical_layout_ops()` without global mutation.
+- PR #400, merge `688199c6c46d41359b34d32cd703ad0635933ae6`: matched
+  explicit and simulated historically installed primitive composition across
+  projection rows, first-X/anchor, indent modes, and body/headword roles.
+- CI #2378, #2380 and #2382 passed on Ubuntu, Windows and macOS.
+- Historical installers deliberately remain; no product cutover in Phase 13C.
+
+## Phase 13D — explicit composed physical-policy boundary (complete)
+
+- PR #401, merge `e67fb01d2c86fe19aa0191fe6b8766061fa737e5`: captured
+  stable raw resolver/inference references and added
+  `infer_composed_physical_page_layout()`, applying Profile anchoring and
+  physical normalization once without global policy wrappers.
+- PR #402, merge `880a05e55302cd04ebda0960448c3f418ea11171`: routed
+  physical-only unlined escalation to the explicit composed policy, retaining
+  cache -> fast projection -> physical detector order and existing labels.
+- CI #2384 and #2386 passed on Ubuntu, Windows and macOS.
+- Phase 13D final gate: PR #403, merged as
+  `d58cc61e94cea0e7312eaf7aa5b2b03f20743697`. CI #2388 passed on
+  Ubuntu, Windows and macOS. Full composed policy parity and unlined scope
+  guards are now merged. Preserve remaining GUI/spawn installers until Phase 13E.
+- Next: Phase 13E full Page Understanding composition, routed one consumer at
+  a time with explicit parity tests and independent GUI/worker validation.
+
+
+## Phase 13E — full Page Understanding transition (in progress)
+
+- PR #404, merged as `b7d78266b0eb71c4b7de5771e290c8dfc3bf147a`,
+  added optional `layout_infer` and explicit `ops` plumbing to full Page
+  Understanding, with the raw entry captured before installer wrapping.
+  Introduced `understand_composed_page()` and finalization-once tests.
+  CI #2390 passed across Ubuntu, Windows and macOS.
+- PR #405, merged as `26b1e0f62330f815dcf30c84d5603a56481513be`,
+  compared full semantic/sampled-evidence Page Understanding against an
+  isolated historically installed composition. CI #2392 passed on all platforms.
+- PR #406, merged as `0a07f749c270c901acf82c0a10a4e9e2f97abc48`,
+  routed Layout Core's physical policy inference to explicit composition while
+  retaining cache keys, hit publication, evidence fusion and caller seam.
+  CI #2394 passed on all platforms.
+- PR #407, merged as `494ac3391af537d50c00936e98a917b20c01b7af`,
+  routed processing's enriched Page Understanding through the explicit service,
+  leaving its layout-only branch unchanged. Initial CI #2396 failed on two
+  tests still injecting the historical mutable entry points. The regressions
+  were updated to target composed full understanding and the stable raw policy
+  contract; rerun CI #2397 passed on all three platforms.
+
+Remaining/explicit stop boundary:
+- Direct legacy callers outside the migrated processing/Layout Core path
+  (including training export and Profile validation) require separate audit
+  and parity tests before rerouting.
+- GUI/bootstrap and processing/spawn `install_robust_line_starts()` and
+  `install_physical_indent_inference()` remain active. Do not delete their
+  calls or wrappers merely because two consumers have migrated.
+- Final gate must prove GUI, spawn/ordinary, unlined, cache publication,
+  page masking and compatibility on Windows/Linux/macOS with no hidden hook
+  reads or differences in symbol and large-head evidence timing.
+- No OCR, PDIC, storage schema or public settings changes are authorized by
+  this phase.
+
+Next safe work: independently characterize remaining direct full Page
+Understanding consumers, migrate them one at a time, and only then consider
+normal product installer retirement after explicit cross-platform parity.
+
+
+## Phase 13E — normal product cutover completed, final gate pending
+
+This is the latest recovery checkpoint. Earlier sections labelled "gate pending"
+describe historical in-progress states and are superseded by the actual merged
+PRs listed below. No ordinary product call path should now install the four
+global Layout primitive callbacks.
+
+- PR #409, merge `eb7c64422fbac0d005d13ce5ca5fa409811037d6`:
+  Training Page Understanding diagnostics and Project Profile validation
+  now call explicit full composition. CI #2402 succeeded on all platforms
+  after updating a stale Profile architecture assertion.
+- PR #410, merge `d92297f5eb0e4f9ed79c8beb78e0ab5c5d6a3dd5`:
+  Proved explicit full and layout-only composition runs under hostile legacy
+  installer/global-hook bindings. CI #2404 passed on all platforms.
+- PR #411, merge `ef16517d8cf8af7fdc66e37b2f5176cf4436b405`:
+  Updated refined Page Design diagnostics to accept optional explicit physical
+  ops and training-export v3 to pass them while preserving its original raw
+  geometry (not replacing it with policy-anchored geometry). CI #2406 passed.
+- PR #412, merge `96d064fa710a2e4e1ff78c21253866d4761dfa5c`:
+  Removed the GUI bootstrap's global Layout installer calls, leaving processing
+  compatibility intact. CI #2409 passed after updating the transition guard.
+- PR #413, merge `5c442861fd4601d6ddc6fcfad4f01ada712869d2`:
+  Removed normal processing's call to `_ensure_layout_runtime()`, while keeping
+  that function and both historical installer APIs available as compatibility
+  shims. CI #2411 passed on all platforms.
+
+Final acceptance gate PR #414 is **in progress** on this branch. It adds a
+source-level guard against future installer calls outside the known
+`processing._ensure_layout_runtime` compatibility shim and checks all migrated
+entry points. Mark Phase 13E formally complete only after CI passes and this PR
+merges. Do not delete legacy installer definitions or the legacy processing
+shim as part of this final gate; legacy raw/direct callers may still opt in.
+
+Behavioral invariants maintained:
+- Explicit Raw/Robust/Physical composition and Profile anchor timing;
+- Page Understanding sampled symbol, generic roles, and display-head evidence;
+- Layout Core cache keys, publication, and visualization result identity;
+- unlined QA cache-first/fast-projection/physical-detector precedence;
+- training export v3 raw page design diagnostics and format;
+- PDIC, OCR runner contracts and user settings;
+- full Ubuntu, Windows and macOS pytest, GUI smoke, compatibility and builds.
+
+After this gate, the remaining optional work is compatibility-shim retirement
+and broader real-scan/performance auditing, NOT a prerequisite to declare
+normal product entry-point composition complete. Any shim deletion is a separate
+high-risk decision requiring proof of no external/direct callers.

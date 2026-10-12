@@ -66,20 +66,19 @@ class PageUnderstanding:
         default_factory=lambda: SymbolEvidenceResult(markers=[])
     )
     arbitration_stats: dict[str, int] = field(default_factory=dict)
+    # Immutable source-space observations serialized for diagnostic consumers.
+    boundary_proposals: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def line_height(self) -> float:
         return max(1.0, float(self.layout.ordinary_line_height))
 
 
-def uses_cjk_role_model(settings: AppSettings) -> bool:
-    """Return whether the validated CJK entry-role model is appropriate."""
+def uses_cjk_script(settings: AppSettings) -> bool:
+    """Recognize CJK page language independently of physical reading direction."""
     profile_id = str(getattr(settings, "dictionary_profile_id", "") or "").lower()
     ocr_language = str(getattr(settings, "ocr_language", "") or "").lower()
     paddle_language = str(getattr(settings, "paddle_language", "") or "").lower()
-    writing = str(getattr(settings, "layout_writing_mode", "horizontal-tb") or "horizontal-tb")
-    if writing.startswith("vertical"):
-        return False
     return bool(
         "cjk" in profile_id
         or any(token in ocr_language for token in (
@@ -87,6 +86,12 @@ def uses_cjk_role_model(settings: AppSettings) -> bool:
         ))
         or paddle_language in {"ch", "chi_sim", "chi_tra", "chinese_cht", "japan"}
     )
+
+
+def uses_cjk_role_model(settings: AppSettings) -> bool:
+    """CJK indentation grammar is currently validated on horizontal pages."""
+    writing = str(getattr(settings, "layout_writing_mode", "horizontal-tb") or "horizontal-tb")
+    return not writing.startswith("vertical") and uses_cjk_script(settings)
 
 
 def _physical_reliable(layout: base.DictionaryPageLayout) -> bool:
@@ -211,6 +216,8 @@ def understand_page(
     *,
     page_index: int = 0,
     page_sections: list[Any] | None = None,
+    layout_infer: Any = None,
+    ops: base.LayoutPrimitiveOps | None = None,
 ) -> PageUnderstanding:
     """Recover one page once for ordinary/OCR/combined drawing.
 
@@ -218,7 +225,8 @@ def understand_page(
     remains authoritative for physical fields.  Sampled marker detection is also
     performed here because it is a page fact shared by all three drawing modes.
     """
-    layout, page_settings, applied = infer_dictionary_page_layout(
+    infer = infer_dictionary_page_layout if layout_infer is None else layout_infer
+    layout, page_settings, applied = infer(
         image, settings, page_index=page_index,
     )
     indent_label = _apply_explicit_indent_semantics(layout, page_settings)
@@ -254,6 +262,7 @@ def understand_page(
                 family,
                 semantic_entries,
                 page_index=page_index,
+                **({"ops": ops} if ops is not None else {}),
             ))
             semantic_entries = refined._deduplicate_reading_order(
                 layout, semantic_entries,
@@ -315,6 +324,10 @@ def understand_page(
         family_offset_ratio=family_ratio,
         symbol_evidence=symbol_evidence,
     )
+
+
+# The legacy physical installer may wrap the public Page Understanding function.
+_RAW_UNDERSTAND_PAGE = understand_page
 
 
 def _column_for_source_point(
@@ -435,5 +448,6 @@ def page_understanding_diagnostics(
         },
         "auto_layout_fields": dict(understanding.applied_layout_fields),
         "arbitration_stats": dict(understanding.arbitration_stats),
+        "boundary_proposals": list(understanding.boundary_proposals),
         "layout": layout_diagnostics(understanding.layout),
     }

@@ -46,11 +46,13 @@ def is_managed_project(project_root: Path) -> bool:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return False
-    return (
-        isinstance(payload, dict)
-        and payload.get("format") == PROJECT_FORMAT
-        and int(payload.get("format_version", 0) or 0) >= PROJECT_FORMAT_VERSION
-    )
+    if not isinstance(payload, dict) or payload.get("format") != PROJECT_FORMAT:
+        return False
+    try:
+        version = int(payload.get("format_version", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return version >= PROJECT_FORMAT_VERSION
 
 
 def settings_path(project_root: Path) -> Path:
@@ -151,12 +153,36 @@ def simplified_review_path_for_image(image_path: Path) -> Path:
 
 
 def page_sections_path_for_image(image_path: Path) -> Path:
-    """Return the per-page SECTION sidecar without changing PDIC/PPP formats."""
+    """Canonical SECTION write path, independent of migrated legacy sidecars."""
     image_path = Path(image_path)
     root = image_path.parent
     if is_managed_project(root):
         return storage_root(root) / "data" / "PageSections" / f"{image_path.stem}.json"
     return root / "QT" / "PageSections" / f"{image_path.stem}.json"
+
+
+def migrated_page_sections_path_for_image(image_path: Path) -> Path | None:
+    """Existing historical SECTION copy inside a managed project's QT tree."""
+    image_path = Path(image_path)
+    if not is_managed_project(image_path.parent):
+        return None
+    legacy_dir = case_insensitive_child(qt_root(image_path.parent), "PageSections")
+    if legacy_dir is None:
+        return None
+    legacy = legacy_dir / f"{image_path.stem}.json"
+    return legacy if legacy.is_file() else None
+
+
+def page_sections_read_path_for_image(image_path: Path) -> Path:
+    """Prefer canonical SECTION data; fall back to migrated historical QT data.
+
+    Migration preserves the old QT tree; writes must never silently destroy it.
+    """
+    image_path = Path(image_path)
+    canonical = page_sections_path_for_image(image_path)
+    if canonical.exists():
+        return canonical
+    return migrated_page_sections_path_for_image(image_path) or canonical
 
 def ppp_write_path_for_image(image_path: Path) -> Path:
     image_path = Path(image_path)
