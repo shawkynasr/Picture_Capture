@@ -58,6 +58,7 @@ from .page_word_mapping import (
 )
 
 from .review_text_helpers import (
+    _has_distinct_ocr_alternatives,
     _candidate_choice_rows,
     _candidate_for_entry_from_list,
     _candidate_word_for_ocr_source,
@@ -89,6 +90,7 @@ from .layout_percent_helpers import (
 )
 
 from .page_list_helpers import (
+    bookmarked_page_indices,
     _fill_status_cell_style,
     _natural_text_key,
     _sorted_page_list_rows,
@@ -134,6 +136,8 @@ from .ui.controllers import (
     HeadwordController, IllustrationController, PageController, ProjectController,
     ReviewController, SESSION_STATE_FILENAME, SessionController,
 )
+from .ui.page_thumbnails import PageThumbnailController, visible_page_iids
+from .ui.page_list_grid import PageListGrid
 from .ui.text_wrap import (
     _label_measure, _mixed_ui_wrap_tokens, _normalize_ui_paragraphs,
     _wrap_mixed_ui_text,
@@ -215,20 +219,19 @@ from .unicode_nonbmp_input import (
     attach_nonbmp_unicode_input, close_nonbmp_unicode_input,
 )
 from .overlay_opacity import (
-    add_quick_opacity_control, clear_alpha_line_photos,
+    clear_alpha_line_photos,
     create_alpha_canvas_line, release_alpha_line_photos,
 )
 from .illustration_polygon_edit import nearest_polygon_segment
+from .illustration_labels import label_text, user_edited_link
 from .illustration_fill_opacity import (
-    add_quick_illustration_fill_opacity_control, clear_alpha_polygon_records,
+    clear_alpha_polygon_records,
     create_alpha_canvas_polygon, refresh_alpha_polygon_fill,
 )
 from .ocr_crop_preview_ui import (
-    add_ocr_crop_preview_control,
     draw_ocr_crop_preview,
 )
 from .layout_visualization_ui_v3 import (
-    add_layout_visualization_controls,
     draw_layout_visualization_if_enabled,
 )
 from .auxiliary_line_controller import AuxiliaryLineController
@@ -512,6 +515,8 @@ class SettingsDialog(tk.Toplevel):
     SETTING_HELP_IMAGES = _settings_schema.SETTING_HELP_IMAGES
     SETTING_CHOICES = _settings_schema.SETTING_CHOICES
     CHECK_HELP = _settings_schema.CHECK_HELP
+    SEPARATOR_Y_FIELDS = _settings_schema.SEPARATOR_Y_FIELDS
+    SEPARATOR_Y_CHECKS = _settings_schema.SEPARATOR_Y_CHECKS
     NORMAL_CHECKS = _settings_schema.NORMAL_CHECKS
     OCR_COMMON_CHECKS = _settings_schema.OCR_COMMON_CHECKS
     OCR_ADVANCED_CHECKS = _settings_schema.OCR_ADVANCED_CHECKS
@@ -787,6 +792,13 @@ class SettingsDialog(tk.Toplevel):
                 )
             check = ttk.Checkbutton(group, text=label, variable=self.vars[name])
             check.grid(row=row, column=0, sticky="w", pady=4)
+            if name == "layout_mask_illustrations_use_existing":
+                parent_mask = self.vars.get("layout_mask_illustrations")
+                if parent_mask is not None:
+                    def _sync_illustration_reuse_state(*_ignored, master=parent_mask, child=check):
+                        child.configure(state="normal" if master.get() else "disabled")
+                    parent_mask.trace_add("write", _sync_illustration_reuse_state)
+                    _sync_illustration_reuse_state()
             info = ttk.Label(group, text="ⓘ", foreground="#6b7280", cursor="hand2")
             info.grid(row=row, column=1, sticky="w", padx=(8, 0))
             callback = lambda l=label, n=name: self._show_check_help(l, n)
@@ -917,25 +929,48 @@ class SettingsDialog(tk.Toplevel):
             justify="left",
         )
         help_title.pack(anchor="w", fill="x", padx=(0, 6))
+        # Each tab owns a vertically scrollable help pane. The old Label
+        # wrapped long explanations but clipped their bottom beyond the window.
+        help_view = ttk.Frame(help_box)
+        help_view.pack(fill="both", expand=True, pady=(7, 0))
+        help_canvas = tk.Canvas(help_view, borderwidth=0, highlightthickness=0)
+        help_scroll = ttk.Scrollbar(help_view, orient="vertical", command=help_canvas.yview)
+        help_canvas.configure(yscrollcommand=help_scroll.set)
+        help_canvas.pack(side="left", fill="both", expand=True)
+        help_scroll.pack(side="right", fill="y")
+        help_content = ttk.Frame(help_canvas)
+        help_window = help_canvas.create_window((0, 0), window=help_content, anchor="nw")
+        help_content.bind(
+            "<Configure>",
+            lambda _e, cv=help_canvas: cv.configure(scrollregion=cv.bbox("all")),
+            add="+",
+        )
+        help_canvas.bind(
+            "<Configure>",
+            lambda e, cv=help_canvas, item=help_window: cv.itemconfigure(
+                item, width=max(1, e.width)
+            ),
+            add="+",
+        )
+        self._settings_help_scroll_canvases.append(help_canvas)
+        # Bind the live variable in every tab rather than taking a snapshot.
         help_body = ttk.Label(
-            help_box,
-            text=self._settings_help_body_var.get(),
+            help_content,
+            textvariable=self._settings_help_body_var,
             foreground="#555b63",
             justify="left",
+            anchor="nw",
+            wraplength=300,
         )
-        help_body._pc_wrap_source = _normalize_ui_paragraphs(
-            self._settings_help_body_var.get()
-        )
-        self._settings_help_body_label = help_body
-        help_body.pack(anchor="w", fill="x", padx=(0, 8), pady=(7, 0))
-        help_image = ttk.Label(help_box, anchor="center")
-        help_separator = ttk.Separator(help_box, orient="horizontal")
+        help_body.pack(anchor="w", fill="x", padx=(0, 8))
+        help_image = ttk.Label(help_content, anchor="center")
+        help_separator = ttk.Separator(help_content, orient="horizontal")
         help_separator.pack(fill="x", pady=(14, 10))
         self._settings_help_image_widgets.append(
-            (help_image, help_separator, help_box)
+            (help_image, help_separator, help_content)
         )
         help_hint = ttk.Label(
-            help_box,
+            help_content,
             text="把鼠标停在设置项上、点击 ⓘ，或用 Tab/鼠标进入输入框时，"
                  "右侧会显示完整说明与版面图解；左侧只保留参数、单位和必要状态。",
             foreground="#7a8088",
@@ -943,12 +978,25 @@ class SettingsDialog(tk.Toplevel):
         )
         help_hint.pack(anchor="w", fill="x", padx=(0, 6))
         self._bind_responsive_labels(
-            help_box,
+            help_content,
             help_body,
             help_hint,
-            horizontal_padding=34,
+            horizontal_padding=18,
             min_wrap=120,
         )
+
+        def scroll_help(event) -> str:
+            direction = (
+                (-1 if event.num == 4 else 1)
+                if getattr(event, "num", None) in (4, 5)
+                else (-1 if getattr(event, "delta", 0) > 0 else 1)
+            )
+            help_canvas.yview_scroll(3 * direction, "units")
+            return "break"
+
+        for wheel_widget in (help_canvas, help_content, help_body, help_hint, help_image):
+            for event_name in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                wheel_widget.bind(event_name, scroll_help, add="+")
         help_box.bind(
             "<Configure>",
             lambda _e: self._schedule_settings_help_image_render(),
@@ -1006,6 +1054,7 @@ class SettingsDialog(tk.Toplevel):
             tuple[ttk.Label, ttk.Separator, ttk.LabelFrame]
         ] = []
         self._settings_help_image_job: str | None = None
+        self._settings_help_scroll_canvases: list[tk.Canvas] = []
 
         outer = ttk.Frame(self, padding=(18, 14, 18, 12))
         outer.pack(fill="both", expand=True)
@@ -1024,6 +1073,8 @@ class SettingsDialog(tk.Toplevel):
         common_tab = ttk.Frame(notebook)
         normal_tab = ttk.Frame(notebook)
         illustration_tab = ttk.Frame(notebook)
+        performance_tab = ttk.Frame(notebook)
+        separator_y_tab = ttk.Frame(notebook)
         ocr_tab = ttk.Frame(notebook)
         display_tab = ttk.Frame(notebook)
         project_tab = ttk.Frame(notebook)
@@ -1035,7 +1086,9 @@ class SettingsDialog(tk.Toplevel):
             (common_tab, "常用"),
             (ocr_tab, "OCR画线"),
             (normal_tab, "普通画线"),
+            (separator_y_tab, "横线 Y 精修"),
             (illustration_tab, "插图"),
+            (performance_tab, "性能与诊断"),
             (display_tab, "显示/校对"),
             (project_tab, "项目/批量"),
             (crop_tab, "切图"),
@@ -1048,7 +1101,9 @@ class SettingsDialog(tk.Toplevel):
         self._settings_tabs = {
             "common": common_tab,
             "normal": normal_tab,
+            "separator_y": separator_y_tab,
             "illustration": illustration_tab,
+            "performance": performance_tab,
             "ocr": ocr_tab,
             "display": display_tab,
             "project": project_tab,
@@ -1236,7 +1291,38 @@ class SettingsDialog(tk.Toplevel):
             self.NORMAL_ADVANCED_FIELDS,
         )
 
+        # Cross-cutting feature, not an OCR-only or ordinary-only option.
+        separator_y_page = self._scrollable_settings_page(separator_y_tab)
+        self._settings_intro(
+            separator_y_page, "横线 Y 精修（所有画线共用）",
+            "集中控制 OCR 与普通画线共享的局部墨迹谷精修。"
+            "横向分析范围对新项目默认 100%；老项目已保存的取值保持不变。",
+        )
+        self._add_check_group(
+            separator_y_page, "启用与安全检查", self.SEPARATOR_Y_CHECKS,
+            intro="白缝安全核验为实验性功能，默认关闭。",
+        )
+        self._add_setting_group(
+            separator_y_page, "精修参数", self.SEPARATOR_Y_FIELDS,
+            intro="横向范围 100% 表示在扣除栏边余量后的整栏可用宽度内寻找空白带；"
+            "并非保证每条线均不穿字。",
+        )
+
         _settings_illustration_ui.build_illustration_settings_tab(self, illustration_tab)
+        performance_page = self._scrollable_settings_page(performance_tab)
+        self._settings_intro(
+            performance_page, "性能测试与诊断",
+            "本页管理运行时测试开关和性能报告；项目设置会自动保存，"
+            "新启动的普通画线子进程继承对应选项。",
+        )
+        self._add_check_group(
+            performance_page, "分析图与性能日志",
+            (
+                ("启用普通画线性能诊断（导出 Markdown/CSV）", "draw_performance_profile"),
+                ("复用已处理的分析图（实验）", "reuse_prepared_analysis"),
+            ),
+            intro="复用功能可能改变重复去噪语义，务必先比较完整 PDIC。",
+        )
 
         ocr_page = self._scrollable_settings_page(ocr_tab)
         self._settings_intro(
@@ -1693,6 +1779,8 @@ class SettingsDialog(tk.Toplevel):
 
     def save(self, *, close: bool = True, show_errors: bool = True) -> bool:
         try:
+            _settings_lifecycle_ui.validate_projection_width(self.vars)
+            _settings_lifecycle_ui.validate_separator_gap_controls(self.vars)
             previous_language = str(getattr(self.parent.settings, "ocr_language", "") or "")
             previous_backend = {
                 name: getattr(self.parent.settings, name, None)
@@ -2410,15 +2498,17 @@ class ReviewWindow(tk.Toplevel):
         self._review_auto_zoom_width = self._review_image_area_width()
         self._request_render_rows(focus_index=0)
 
-    def _review_image_area_width(self) -> int:
-        """Return the usable crop-image width inside the proofreading left pane."""
+    def _review_image_area_width(self, canvas_width: int | None = None) -> int:
+        """Leave room for the main-style sequence badge beside each crop."""
         try:
-            canvas_width = int(self.canvas.winfo_width())
+            if canvas_width is None:
+                canvas_width = int(self.canvas.winfo_width())
+            from .ui.review_crop_sequence import review_sequence_gutter
+            badge_width = review_sequence_gutter(self)
         except (AttributeError, tk.TclError, TypeError, ValueError):
             return 1
-        # Crop labels use padx=6 on both sides. Keeping that 12 px outside the
-        # 99% image target prevents a nominally fitted strip from overflowing.
-        return max(1, canvas_width - 12)
+        # 6px outer padding on each side, plus the measured badge and gap.
+        return max(1, int(canvas_width) - 12 - badge_width)
 
     def _review_canvas_configured(self, event: tk.Event) -> None:
         try:
@@ -2427,7 +2517,7 @@ class ReviewWindow(tk.Toplevel):
             return
         if not self.review_zoom_auto:
             return
-        usable_width = max(1, int(event.width) - 12)
+        usable_width = self._review_image_area_width(event.width)
         # Ignore geometry noise that cannot change the rounded crop width.
         if abs(usable_width - int(self._review_auto_zoom_width or 0)) <= 1:
             return
@@ -2467,6 +2557,12 @@ class ReviewWindow(tk.Toplevel):
         row1.pack(fill="x", pady=(0, 4))
         self.review_control_row = row1
         self._review_flat_button(row1, "保存", self.save, role="primary").pack(side="left")
+        self._review_flat_button(row1, "撤销保存", self.undo_saved_review).pack(side="left", padx=(4, 0))
+        self._review_flat_button(row1, "重做保存", self.redo_saved_review).pack(side="left", padx=(4, 0))
+        # Add non-conflicting session-save shortcuts. Plain Ctrl+Z/Y remain
+        # owned by the focused text editor / platform, never hijacked here.
+        self.bind("<Control-Alt-z>", lambda _event: self.undo_saved_review())
+        self.bind("<Control-Alt-y>", lambda _event: self.redo_saved_review())
         self._sync_autosave_label()
         ttk.Checkbutton(
             row1, textvariable=self.autosave_label_var, variable=self.parent.autosave_var,
@@ -2494,6 +2590,14 @@ class ReviewWindow(tk.Toplevel):
             row1, text="排序检查", width=7, command=self.run_order_check,
             style="PCR.Compact.TButton",
         ).pack(side="left", padx=(5, 0))
+        if getattr(self.parent.settings, "proofreading_event_capture", False):
+            # Explicit, second-stage source-image review; never an autosave
+            # action or implicit approval of a PDIC correction.
+            ttk.Button(
+                row1, text="核验记录", width=8,
+                command=self._open_proofreading_visual_verification,
+                style="PCR.Compact.TButton",
+            ).pack(side="left", padx=(6, 0))
         ttk.Separator(controls, orient="horizontal").pack(fill="x", pady=(5, 0))
 
         focused = ttk.Frame(
@@ -4199,10 +4303,15 @@ class ReviewWindow(tk.Toplevel):
             return True
         if not dirty:
             return True
+        from .ui.review_transaction_actions import capture_review_before, record_review_after
+        transaction_before = capture_review_before(self)
+        evidence_before = self._review_evidence_before_save()
         self._commit_edits()
         self.parent.settings.review_zoom_percent = self._stored_review_zoom_percent()
         self.parent.save_pdic(silent=True, sync_editors=False)
+        self._review_evidence_after_save(evidence_before)
         self._persist_simplified_page(current_stem)
+        record_review_after(self, transaction_before)
         return True
 
     def _effective_wordslist_locator_mode(self) -> str:
@@ -4745,9 +4854,70 @@ class ReviewWindow(tk.Toplevel):
             on_done=loaded, on_error=failed,
         )
 
+    # Thin class-level UI delegation; the transaction service owns decisions.
+    from .ui.review_transaction_actions import undo_saved_review, redo_saved_review
+
     def _commit_edits(self) -> None:
         from .review_main_editor_sync import commit_proofread_entries
         commit_proofread_entries(self)
+
+    def _open_proofreading_visual_verification(self) -> None:
+        """User-initiated scan preview and independent judgment, never OCR."""
+        from .proofreading_verify_ui import open_visual_verification
+        open_visual_verification(self)
+
+    def _review_evidence_before_save(self) -> list[WordEntry] | None:
+        """Read the pre-edit on-disk PDIC only for explicit project-local opt-in."""
+        if not bool(getattr(
+            getattr(self.parent, "settings", None), "proofreading_event_capture", False
+        )):
+            return None
+        page = getattr(self.parent, "current_page", None)
+        if page is None or getattr(self.parent, "project", None) is None:
+            return None
+        self.__dict__["_review_evidence_source_fingerprints"] = None
+        self.__dict__["_review_evidence_prior_pdic_sha256"] = None
+        self.__dict__["_review_evidence_source_page"] = page
+        try:
+            from .proofreading_events import sha256_file
+            saved = pdic_path(page)
+            prior_sha = sha256_file(saved)
+            previous = read_pdic(saved)
+            if prior_sha is None or sha256_file(saved) != prior_sha:
+                return None
+            self.__dict__["_review_evidence_prior_pdic_sha256"] = prior_sha
+            from .proofreading_capture import verified_ocr_preedit_fingerprints
+            cache_fn = getattr(self.parent, "_paddle_cache_path", None)
+            cache = cache_fn() if callable(cache_fn) else None
+            self.__dict__["_review_evidence_source_fingerprints"] = (
+                verified_ocr_preedit_fingerprints(cache, pdic_path(page))
+            )
+            return previous
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def _review_evidence_after_save(self, previous: list[WordEntry] | None) -> None:
+        """Supplement a committed PDIC, never modify or roll back user edits."""
+        if previous is None:
+            return
+        page = getattr(self.parent, "current_page", None)
+        project = getattr(self.parent, "project", None)
+        owned_page = self.__dict__.pop("_review_evidence_source_page", None)
+        if page is None or project is None or page != owned_page:
+            return
+        try:
+            from .proofreading_capture import capture_saved_review_rename
+            source = self.__dict__.pop("_review_evidence_source_fingerprints", None)
+            prior_sha = self.__dict__.pop("_review_evidence_prior_pdic_sha256", None)
+            capture_saved_review_rename(
+                project_root=project.root, page=page, prior_pdic_entries=previous,
+                source_fingerprints=source, prior_pdic_sha256=prior_sha,
+            )
+        except (OSError, ValueError, TypeError):
+            self.parent.status_var.set(
+                "校对内容已保存，但本地校对操作日志写入失败，请检查磁盘权限。"
+            )
+
 
     def _bound_row_entries(self) -> list[WordEntry]:
         """Return stable rendered-row bindings, with compatibility fallback."""
@@ -5724,6 +5894,8 @@ class ReviewWindow(tk.Toplevel):
         if getattr(self, "_active_crop_page_stem", None) != current_stem:
             self._active_crop_fixed_size = None
             self._active_crop_page_stem = current_stem
+        from .ui.review_transaction_actions import history_page_changed
+        history_page_changed(self, current_stem)
         self._rendered_page_stem = current_stem
         simplified_records = self._simplified_page_records(current_stem) if current_stem else {}
         if not self.parent.image:
@@ -5735,6 +5907,7 @@ class ReviewWindow(tk.Toplevel):
         self._review_display_crops = list(preloaded_crops)
         self._review_row_pictures.clear()
         words = self.parent._project_words if self.parent.project else set()
+        from .ui.review_crop_sequence import create_review_crop_with_index
         for index, entry in enumerate(ordered):
             next_entry = ordered[index + 1] if index + 1 < len(ordered) else None
             # Crop and LANCZOS resize are completed by a worker before this
@@ -5744,8 +5917,9 @@ class ReviewWindow(tk.Toplevel):
             # Each inline slice already has its text-dependent crop height:
             # one-character headwords use 大字头切图高, others use ordinary.
             photo = self._ordinary_review_photo(index)
-            picture = ttk.Label(self.rows, image=photo, style="PCR.Crop.TLabel")
-            picture.grid(row=index * 2, column=0, sticky="ew", padx=6, pady=(8, 0))
+            picture, sequence_label, crop_row = create_review_crop_with_index(
+                self, self.rows, photo=photo, index=index, total=len(ordered),
+            )
             self.thumbnails.append(photo)
             self._review_row_pictures.append(picture)
             var = tk.StringVar(value=entry.word)
@@ -5791,8 +5965,12 @@ class ReviewWindow(tk.Toplevel):
             # Membership colors are intentionally pale status colors in both
             # themes. Keep this frame out of the generic dark mapper.
             editor_frame._pc_skip_classic_appearance = True
+            from .ui.overlay_delete_button import fixed_overlay_control_font
             delete_button = tk.Button(
                 editor_frame, text="[X]", width=3, takefocus=False,
+                font=fixed_overlay_control_font(
+                    editor_frame, self.parent.settings.ocr_language,
+                ),
                 relief="flat", bd=0, padx=1, pady=0, cursor="hand2",
                 fg="#8b1a1a", bg="#f3eeee", activebackground="#f4d9d9",
                 command=lambda i=index: self.delete_review_entry(i),
@@ -5886,7 +6064,7 @@ class ReviewWindow(tk.Toplevel):
             simplified_editor.bind("<<Cut>>", lambda _e, i=index: self._claim_simplified_clipboard_edit(i))
             simplified_editor.bind("<KeyRelease>", lambda e, i=index: self.on_simplified_key(e, i))
             simplified_editor.bind("<Return>", lambda _e, i=index: self.focus_index(i + 1))
-            for widget in (picture, delete_button, editor_frame, editor, simplified_editor, simplified_search_button):
+            for widget in (picture, sequence_label, crop_row, delete_button, editor_frame, editor, simplified_editor, simplified_search_button):
                 widget.bind("<MouseWheel>", self.scroll_rows)
                 widget.bind("<Button-4>", lambda e: self.scroll_rows_linux(-1))
                 widget.bind("<Button-5>", lambda e: self.scroll_rows_linux(1))
@@ -6401,28 +6579,52 @@ class ReviewWindow(tk.Toplevel):
             return "break"
         if not self.parent._claim_page_for_manual_edit():
             return "break"
+        if str(getattr(row_entries[int(index)], "candidate_id", "") or ""):
+            # Candidate deletion publishes disk before mutating Tk/Entry.
+            from .ui.review_candidate_delete_actions import delete_owned_review_candidate
+            return delete_owned_review_candidate(self, int(index), row_entries)
 
+        # Only explicitly enabled, project-local evidence capture. Save the
+        # *previous on-disk* PDIC before mutating any shared Entry objects.
+        capture_requested = bool(getattr(
+            getattr(self.parent, "settings", None), "proofreading_event_capture", False
+        ))
+        prior_pdic_rows = None
+        prior_ocr_fingerprints = None
+        if capture_requested and self.parent.current_page is not None:
+            try:
+                prior_pdic_rows = read_pdic(pdic_path(self.parent.current_page))
+                from .proofreading_capture import verified_ocr_preedit_fingerprints
+                cache_fn = getattr(self.parent, "_paddle_cache_path", None)
+                cache = cache_fn() if callable(cache_fn) else None
+                prior_ocr_fingerprints = verified_ocr_preedit_fingerprints(
+                    cache, pdic_path(self.parent.current_page),
+                )
+            except (OSError, ValueError, TypeError):
+                prior_pdic_rows = None
+
+        # Capture before mutating shared Entry objects or saving the PDIC.
+        # OCR-linked deletion changes manual-selection ownership and will
+        # intentionally be refused by the R3 transaction classifier.
+        from .ui.review_transaction_actions import capture_review_before, record_review_after
+        transaction_before = capture_review_before(self)
         self._commit_edits()
         entry = row_entries[int(index)]
+        deleted_identity = (str(entry.word), int(entry.x), int(entry.y))
+        deleted_candidate_id = str(entry.candidate_id or "")
+        candidate_id_unique = (
+            bool(deleted_candidate_id)
+            and sum(
+                str(row.get("candidate_id", "")) == deleted_candidate_id
+                for row in getattr(self.parent, "ocr_review_candidates", ())
+                if isinstance(row, dict)
+            ) == 1
+        )
         simplified_key = simplified_entry_key(entry.x, entry.y)
         rendered_stem = getattr(self, "_rendered_page_stem", "")
         if rendered_stem and hasattr(self, "_simplified_page_cache"):
             self._simplified_page_records(rendered_stem).pop(simplified_key, None)
             self._simplified_dirty_pages.add(rendered_stem)
-
-        # When the row came from a named OCR review candidate, remember the
-        # deletion as an explicit deselection so reopening/reprocessing the page
-        # does not silently resurrect a manually removed headword.
-        if entry.candidate_id:
-            candidate = self.parent.get_review_candidate(entry.candidate_id)
-            if candidate is not None:
-                candidate["selected"] = False
-                check_var = self.parent.candidate_check_vars.get(str(entry.candidate_id))
-                if check_var is not None:
-                    check_var.set(False)
-                self.parent._write_manual_override(
-                    candidate, selected=False, word=entry.word, engine="review_delete"
-                )
 
         if entry in self.parent.entries:
             self.parent.entries.remove(entry)
@@ -6431,8 +6633,29 @@ class ReviewWindow(tk.Toplevel):
         # Do not sync stale main-canvas Entry widgets back into the shared model:
         # the proofreading text above is the newest source of truth.
         self.parent.save_pdic(silent=True, sync_editors=False)
+        capture_failed = False
+        if prior_pdic_rows is not None:
+            try:
+                from .proofreading_capture import capture_saved_review_deletion
+                capture_saved_review_deletion(
+                    project_root=self.parent.project.root,
+                    page=self.parent.current_page,
+                    prior_pdic_entries=prior_pdic_rows,
+                    expected_deleted=deleted_identity,
+                    deleted_candidate_id=deleted_candidate_id,
+                    candidate_id_unique=candidate_id_unique,
+                    source_fingerprints=prior_ocr_fingerprints,
+                )
+            except (OSError, ValueError, TypeError):
+                # PDIC and manual overrides were saved successfully. Evidence
+                # errors must neither undo that save nor silently claim success.
+                capture_failed = True
         if getattr(self, "_rendered_page_stem", "") and hasattr(self, "_simplified_page_cache"):
             self._persist_simplified_page(self._rendered_page_stem)
+        # The soon-to-be-rebuilt ReviewWindow rows still reference the old
+        # widgets; read the true saved parent.entries to classify this one
+        # committed deletion, then rebuild widgets for the restored identities.
+        record_review_after(self, transaction_before, allow_unbound=True)
         self.parent.redraw()
 
         next_index = min(int(index), max(0, len(self.parent.entries) - 1))
@@ -6442,7 +6665,10 @@ class ReviewWindow(tk.Toplevel):
         if not self.parent.entries:
             self._show_ocr_options(None)
             self._update_title()
-        self.parent.status_var.set(f"已删除词条：{deleted_word}")
+        self.parent.status_var.set(
+            f"已删除词条：{deleted_word}"
+            + ("（本地操作日志保存失败，PDIC 已保存）" if capture_failed else "")
+        )
         return "break"
 
     def _save_digit_map(self) -> None:
@@ -6543,11 +6769,16 @@ class ReviewWindow(tk.Toplevel):
                 return
             if not self.parent._claim_page_for_manual_edit():
                 return
+        from .ui.review_transaction_actions import capture_review_before, record_review_after
+        transaction_before = capture_review_before(self)
+        evidence_before = self._review_evidence_before_save()
         self._commit_edits()
         self.parent.settings.review_zoom_percent = self._stored_review_zoom_percent()
         self.parent.save_pdic(sync_editors=False)
+        self._review_evidence_after_save(evidence_before)
         if self.parent.current_page:
             self._persist_simplified_page(self.parent.current_page.stem)
+        record_review_after(self, transaction_before)
         if self.parent.project:
             try:
                 self.parent.settings.to_json(settings_path(self.parent.project.root))
@@ -6816,7 +7047,7 @@ class PictureCaptureApp(tk.Tk):
         self.entry_editor_bindings: list[tuple[tk.Entry, WordEntry]] = []
         self.status_var = tk.StringVar(value="请选择一个词典扫描项目目录")
         self.cursor_status_var = tk.StringVar(value="坐标：—｜缩放 100%｜词条 0")
-        self.image_metadata_status_var = tk.StringVar(value="—×— px｜DPI —")
+        self.image_metadata_status_var = tk.StringVar(value="—×— px")
         self.hide_var = tk.BooleanVar(value=False)
         # polygon_var controls visibility of saved illustration polygons.
         # polygon_draw_var is a separate, explicit editing mode.
@@ -7491,6 +7722,9 @@ class PictureCaptureApp(tk.Tk):
         self.appearance_mode = normalized
         self._configure_global_appearance()
         self._configure_main_workspace_styles()
+        previews = self.__dict__.get("_page_thumbnails")
+        if previews is not None:
+            previews.apply()  # Theme reconfiguration resets the Treeview rowheight.
         self._apply_current_appearance(self)
         from .ui.workspace_tools import (
             refresh_compact_header_buttons, refresh_macaron_action_buttons,
@@ -7979,7 +8213,7 @@ class PictureCaptureApp(tk.Tk):
             if self.project and self.current_page and self.image is not None:
                 try:
                     self.save_pdic(silent=True)
-                    write_ppp(self._ppp_write_path(self.current_page), self.polygons, self.current_page.stem)
+                    self._save_normalized_ppp()
                     self.settings.to_json(settings_path(self.project.root))
                 except (OSError, ValueError, tk.TclError):
                     pass
@@ -8070,7 +8304,7 @@ class PictureCaptureApp(tk.Tk):
         )
         self.sidebar_canvas.pack(side="left", fill="both", expand=True)
         sidebar = ttk.Frame(
-            self.sidebar_canvas, padding=(7, 7, 6, 5), style="PC.Sidebar.TFrame"
+            self.sidebar_canvas, padding=(7, 0, 6, 5), style="PC.Sidebar.TFrame"
         )
         self._sidebar_window = self.sidebar_canvas.create_window((0, 0), window=sidebar, anchor="nw")
         sidebar.bind("<Configure>", self._resize_sidebar_content)
@@ -8088,9 +8322,9 @@ class PictureCaptureApp(tk.Tk):
         from .ui.workspace_tools import install_workspace_tools
         install_workspace_tools(self, sidebar, sidebar_host)
 
-        page_panel = ttk.Frame(sidebar, padding=(2, 2, 2, 0), style="PC.Sidebar.TFrame")
+        page_panel = ttk.Frame(sidebar, padding=(2, 0, 2, 0), style="PC.Sidebar.TFrame")
         self.page_panel = page_panel
-        page_panel.grid(row=0, column=0, rowspan=2, sticky="nsew", pady=(5, 0))
+        page_panel.grid(row=0, column=0, rowspan=2, sticky="nsew")
         page_panel.columnconfigure(0, weight=1)
         page_panel.rowconfigure(2, weight=1)
 
@@ -8104,9 +8338,9 @@ class PictureCaptureApp(tk.Tk):
         self.page_range_controls_row = range_row
         range_row.pack(fill="x", pady=(0, 3))
         for label, mode in (("当前", "current"), ("至末页", "to_end"),
-                            ("至指定", "to_specified")):
+                            ("至指定", "to_specified"), ("书签", "bookmarks")):
             ttk.Radiobutton(range_row, text=label, variable=self.page_range_var,
-                            value=mode).pack(side="left", padx=(0, 3))
+                            value=mode).pack(side="left", padx=(0, 1))
         spec_row = ttk.Frame(nav_area)
         spec_row.pack(fill="x", pady=(0, 4))
         ttk.Radiobutton(spec_row, text="", variable=self.page_range_var,
@@ -8131,6 +8365,10 @@ class PictureCaptureApp(tk.Tk):
                                 command=command, style="PC.PageNav.TButton")
             button.pack(side="left", padx=(0, 4))
             self._attach_tooltip(button, tip)
+        # First-column previews are controlled directly below the 下页 row,
+        # not by Settings Center.  The original table remains authoritative.
+        thumbnail_controls_host = ttk.Frame(nav_area, style="PC.Sidebar.TFrame")
+        thumbnail_controls_host.pack(fill="x")
         list_frame = ttk.Frame(page_panel)
         list_frame.grid(row=2, column=0, sticky="nsew")
         list_frame.columnconfigure(0, weight=1); list_frame.rowconfigure(0, weight=1)
@@ -8166,10 +8404,11 @@ class PictureCaptureApp(tk.Tk):
         self.page_list.column("fill_status", width=110, anchor="center", stretch=False)
         self.page_list.column("illustrations", width=58, anchor="center", stretch=False)
         self.page_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self._page_list_scroll)
-        page_hscroll = ttk.Scrollbar(list_frame, orient="horizontal", command=self.page_list.xview)
+        page_hscroll = ttk.Scrollbar(list_frame, orient="horizontal", command=self._page_list_hscroll)
         self.page_list.configure(yscrollcommand=self._page_list_yscroll,
                                  xscrollcommand=page_hscroll.set)
         self.page_list.grid(row=0, column=0, sticky="nsew")
+        self._page_index_grid = PageListGrid(self.page_list)
         page_hscroll.grid(row=1, column=0, sticky="ew")
         self.page_scroll.grid(row=0, column=1, sticky="ns")
         self.page_list.bind("<<TreeviewSelect>>", self.on_page_select)
@@ -8186,6 +8425,9 @@ class PictureCaptureApp(tk.Tk):
             "illustrations": tk.BooleanVar(value=bool(getattr(self.settings, "page_list_show_illustrations", True))),
         }
         self._apply_page_list_display_columns(save=False)
+        self._page_thumbnails = PageThumbnailController(
+            self, self.page_list, thumbnail_controls_host,
+        )
 
         self.canvas = tk.Canvas(
             viewer, bg=self._main_ui_colors["canvas"], highlightthickness=0
@@ -8338,8 +8580,7 @@ class PictureCaptureApp(tk.Tk):
 
         header_font = font.nametofont("TkHeadingFont")
         body_font = font.nametofont("TkDefaultFont")
-        # Size to content instead of giving "page" a disproportionate share
-        # of the entire sidebar width. Keep long filenames scrollable.
+        # Preserve content-sized page columns and horizontal scrolling.
         page_names = (
             page.stem for page in getattr(self.project, "images", ())
         ) if self.project else ()
@@ -8355,6 +8596,7 @@ class PictureCaptureApp(tk.Tk):
             label = self._page_list_heading_labels.get(column, column)
             width = max(base.get(column, 60), header_font.measure(label) + 6)
             self.page_list.column(column, width=width, anchor="center", stretch=False)
+        self._schedule_page_cell_overlay_refresh()
 
     def _hide_page_list_section_heading_hint(self, _event=None) -> None:
         popup = getattr(self, "_page_list_section_heading_hint", None)
@@ -8419,12 +8661,7 @@ class PictureCaptureApp(tk.Tk):
         return "break"
 
     def _schedule_page_cell_overlay_refresh(self) -> None:
-        """Coalesce Treeview cell-overlay repaints into one idle callback.
-
-        Treeview can emit many yscroll/configure callbacks while rows are being
-        inserted or metadata is filled.  Scheduling a repaint for each callback
-        made large projects appear to hang during startup.
-        """
+        """Coalesce visible table colors, cell borders and thumbnails on idle."""
         if not hasattr(self, "page_list"):
             return
         if self._page_overlay_refresh_job is not None:
@@ -8433,6 +8670,12 @@ class PictureCaptureApp(tk.Tk):
         def run() -> None:
             self._page_overlay_refresh_job = None
             self._refresh_lined_cell_overlays()
+            grid = self.__dict__.get("_page_index_grid")
+            if grid is not None:
+                grid.repaint(dark="dark" in str(getattr(self, "appearance_mode", "")).lower())
+            previews = self.__dict__.get("_page_thumbnails")
+            if previews is not None:
+                previews.request_visible()
 
         self._page_overlay_refresh_job = self.after_idle(run)
 
@@ -8443,6 +8686,10 @@ class PictureCaptureApp(tk.Tk):
 
     def _page_list_scroll(self, *args) -> None:
         self.page_list.yview(*args)
+        self._schedule_page_cell_overlay_refresh()
+
+    def _page_list_hscroll(self, *args) -> None:
+        self.page_list.xview(*args)
         self._schedule_page_cell_overlay_refresh()
 
     def _page_list_yscroll(self, first: str, last: str) -> None:
@@ -8774,45 +9021,11 @@ class PictureCaptureApp(tk.Tk):
             mapping.clear()
 
     def _visible_page_list_iids(self) -> list[str]:
-        """Return only rows currently intersecting the Treeview viewport.
-
-        Cell coloring uses child Labels because ttk.Treeview has no per-cell tag
-        colors.  Scanning every page on every repaint is unnecessarily expensive;
-        only visible rows can have an overlay, so walk forward from the first
-        visible row and stop as soon as ``bbox`` leaves the viewport.
-        """
-        if not hasattr(self, "page_list"):
-            return []
-        try:
-            height = max(1, int(self.page_list.winfo_height()))
-            iid = self.page_list.identify_row(1)
-            if not iid:
-                iid = self.page_list.identify_row(min(height - 1, 20))
-            if not iid:
-                return []
-            visible: list[str] = []
-            while iid:
-                bbox = self.page_list.bbox(iid)
-                if not bbox:
-                    break
-                _x, y, _width, row_height = bbox
-                if y >= height:
-                    break
-                if y + row_height > 0:
-                    visible.append(str(iid))
-                iid = self.page_list.next(iid)
-            return visible
-        except tk.TclError:
-            return []
+        """Shared viewport scanner for semantic cell overlays and thumbnails."""
+        return visible_page_iids(self.page_list) if hasattr(self, "page_list") else []
 
     def _refresh_lined_cell_overlays(self) -> None:
-        """Paint semantic colors only for visible page-list cells.
-
-        Tk/ttk Treeview tags color whole rows rather than individual cells, so
-        child Labels are placed over the relevant cells.  v2.9.13 keeps the
-        v2.9.12 color semantics but repaints only visible rows and coalesces
-        callbacks, preventing large projects from stalling during list startup.
-        """
+        """Paint status-cell labels for visible rows; grid paints afterwards."""
         if not hasattr(self, "page_list"):
             return
         self._clear_lined_cell_overlays()
@@ -9069,741 +9282,6 @@ class PictureCaptureApp(tk.Tk):
             for i in changed_indices:
                 self._update_page_row(i)
             self._schedule_page_cell_overlay_refresh()
-
-    def _build_quick_settings(self, parent: ttk.Frame) -> None:
-        self.quick_vars: dict[str, tk.Variable] = {}
-        self.quick_pixel_vars: dict[str, tk.StringVar] = {}
-        self._quick_geometry_edit_source: dict[str, str] = {}
-        self.quick_bool_vars: dict[str, tk.BooleanVar] = {}
-        self.quick_field_casts: dict[str, type] = {}
-        self.quick_field_labels: dict[str, ttk.Label] = {}
-
-        def add_field(
-            panel: ttk.Frame, row: int, col: int, label: str, name: str, cast: type,
-            width: int = 7,
-        ) -> None:
-            label_widget = ttk.Label(
-                panel, text=label, style="PC.FieldLabel.TLabel"
-            )
-            label_widget.grid(
-                row=row, column=col, sticky="e", padx=(0, 3), pady=1
-            )
-            self.quick_field_labels[name] = label_widget
-            var = tk.StringVar(value=str(getattr(self.settings, name)))
-            self.quick_vars[name] = var
-            self.quick_field_casts[name] = cast
-            if name in LAYOUT_PERCENT_AXES:
-                value_frame = ttk.Frame(panel)
-                value_frame.grid(
-                    row=row, column=col + 1, sticky="ew", padx=(0, 6), pady=1
-                )
-                ttk.Entry(
-                    value_frame,
-                    textvariable=var,
-                    width=max(5, width - 1),
-                    justify="left",
-                    style="PC.Compact.TEntry",
-                ).pack(side="left")
-                ttk.Label(value_frame, text="%").pack(side="left", padx=(2, 4))
-                pixel_var = tk.StringVar(value=str(int(getattr(self.settings, name))))
-                self.quick_pixel_vars[name] = pixel_var
-                ttk.Spinbox(
-                    value_frame,
-                    from_=0,
-                    to=100000,
-                    increment=1,
-                    width=6,
-                    textvariable=pixel_var,
-                ).pack(side="left")
-                ttk.Label(value_frame, text="px").pack(side="left", padx=(2, 0))
-            else:
-                ttk.Entry(
-                    panel,
-                    textvariable=var,
-                    width=width,
-                    justify="left",
-                    style="PC.Compact.TEntry",
-                ).grid(row=row, column=col + 1, sticky="ew", padx=(0, 6), pady=1)
-
-        preprocess = self._section_frame(
-            parent, "图片预处理(前置)", padding=5, section_key="preprocess"
-        )
-        self.preprocess_panel = preprocess
-        preprocess.pack(fill="x")
-        preprocess.columnconfigure(0, weight=1)
-
-        preprocess_mode_row = ttk.Frame(preprocess)
-        preprocess_mode_row.grid(row=0, column=0, sticky="ew")
-        self.preprocess_mode_button = ttk.Button(
-            preprocess_mode_row,
-            text="进入预处理模式",
-            command=self.toggle_preprocess_mode,
-            style="PC.Compact.TButton",
-        )
-        self.preprocess_mode_button.pack(side="left", fill="x", expand=True)
-        ttk.Checkbutton(
-            preprocess_mode_row,
-            text="自动纠偏",
-            variable=self.preprocess_auto_deskew_var,
-            command=self._preprocess_settings_changed,
-        ).pack(side="left", padx=(6, 0))
-        ttk.Label(preprocess_mode_row, text="安全边界：").pack(side="left", padx=(8, 2))
-        safety_spin = ttk.Spinbox(
-            preprocess_mode_row,
-            from_=0, to=500, increment=5, width=6,
-            textvariable=self.preprocess_safety_var,
-        )
-        safety_spin.pack(side="left")
-        ttk.Label(preprocess_mode_row, text="px").pack(side="left", padx=(2, 0))
-        safety_spin.bind("<Return>", self._preprocess_settings_changed)
-        safety_spin.bind("<FocusOut>", self._preprocess_settings_changed)
-
-        preprocess_geometry_row = ttk.Frame(preprocess)
-        preprocess_geometry_row.grid(row=1, column=0, sticky="ew", pady=(4, 0))
-        ttk.Label(preprocess_geometry_row, text="几何纠正：").pack(side="left")
-        geometry_combo = ttk.Combobox(
-            preprocess_geometry_row,
-            textvariable=self.preprocess_geometry_var,
-            values=(
-                "自动几何（推荐）",
-                "轻量：旋转+裁边",
-                "自动透视",
-                "UVDoc展平（Paddle高级）",
-            ),
-            state="readonly",
-            width=22,
-        )
-        geometry_combo.pack(side="left", fill="x", expand=True)
-        geometry_combo.bind("<<ComboboxSelected>>", self._preprocess_settings_changed)
-        manual_corner_button = ttk.Button(
-            preprocess_geometry_row,
-            text="手动四角",
-            command=self.edit_preprocess_corners,
-            style="PC.Compact.TButton",
-        )
-        manual_corner_button.pack(side="left", padx=(6, 0))
-        reset_corner_button = ttk.Button(
-            preprocess_geometry_row,
-            text="重置四角",
-            command=self.reset_preprocess_corners,
-            style="PC.Compact.TButton",
-        )
-        reset_corner_button.pack(side="left", padx=(4, 0))
-        self._attach_tooltip(
-            manual_corner_button,
-            "在原始整页图上拖动左上、右上、右下、左下四个控制点；手动四角优先于自动透视，也可在 UVDoc 前先做人工透视校正。",
-        )
-        self._attach_tooltip(
-            reset_corner_button,
-            "删除当前页的手动四角覆盖，恢复自动几何纠正。",
-        )
-
-        preprocess_action_row = ttk.Frame(preprocess)
-        preprocess_action_row.grid(row=2, column=0, sticky="ew", pady=(4, 0))
-        for col in range(4):
-            preprocess_action_row.columnconfigure(col, weight=1, uniform="preprocess-actions")
-        for col, (text_value, command) in enumerate((
-            ("分析所选范围", self.analyze_preprocess_selected),
-            ("上一需检查", lambda: self.jump_preprocess_review(-1)),
-            ("下一需检查", lambda: self.jump_preprocess_review(1)),
-            ("诊断信息", self.show_preprocess_diagnostics),
-        )):
-            ttk.Button(
-                preprocess_action_row, text=text_value, command=command,
-                style="PC.Compact.TButton",
-            ).grid(row=0, column=col, sticky="ew", padx=(0 if col == 0 else 4, 0))
-
-        preprocess_canvas_row = ttk.Frame(preprocess)
-        preprocess_canvas_row.grid(row=3, column=0, sticky="ew", pady=(4, 0))
-        ttk.Checkbutton(
-            preprocess_canvas_row,
-            text="统一最终页面",
-            variable=self.preprocess_export_canvas_var,
-            command=self._preprocess_export_settings_changed,
-        ).pack(side="left")
-        canvas_mode_combo = ttk.Combobox(
-            preprocess_canvas_row,
-            textvariable=self.preprocess_export_canvas_mode_var,
-            values=("本批最大裁剪尺寸", "自定义尺寸"),
-            state="readonly",
-            width=15,
-        )
-        canvas_mode_combo.pack(side="left", padx=(6, 0))
-        canvas_mode_combo.bind(
-            "<<ComboboxSelected>>", self._preprocess_export_settings_changed
-        )
-        ttk.Label(preprocess_canvas_row, text="页面宽×高：").pack(side="left", padx=(8, 2))
-        canvas_width_spin = ttk.Spinbox(
-            preprocess_canvas_row,
-            from_=0, to=100000, increment=10, width=7,
-            textvariable=self.preprocess_export_canvas_width_var,
-        )
-        canvas_width_spin.pack(side="left")
-        ttk.Label(preprocess_canvas_row, text="×").pack(side="left", padx=2)
-        canvas_height_spin = ttk.Spinbox(
-            preprocess_canvas_row,
-            from_=0, to=100000, increment=10, width=7,
-            textvariable=self.preprocess_export_canvas_height_var,
-        )
-        canvas_height_spin.pack(side="left")
-        for widget in (canvas_width_spin, canvas_height_spin):
-            widget.bind("<Return>", self._preprocess_export_settings_changed)
-            widget.bind("<FocusOut>", self._preprocess_export_settings_changed)
-
-        preprocess_margin_row = ttk.Frame(preprocess)
-        preprocess_margin_row.grid(row=4, column=0, sticky="ew", pady=(4, 0))
-        ttk.Label(preprocess_margin_row, text="页边空(px)：").pack(side="left")
-        margin_widgets = []
-        for label, variable in (
-            ("上", self.preprocess_export_margin_top_var),
-            ("左", self.preprocess_export_margin_left_var),
-            ("下", self.preprocess_export_margin_bottom_var),
-            ("右", self.preprocess_export_margin_right_var),
-        ):
-            ttk.Label(preprocess_margin_row, text=f"{label}：").pack(
-                side="left", padx=(5, 1)
-            )
-            spin = ttk.Spinbox(
-                preprocess_margin_row,
-                from_=0, to=100000, increment=5, width=5,
-                textvariable=variable,
-            )
-            spin.pack(side="left")
-            margin_widgets.append(spin)
-        for widget in margin_widgets:
-            widget.bind("<Return>", self._preprocess_export_settings_changed)
-            widget.bind("<FocusOut>", self._preprocess_export_settings_changed)
-
-        preprocess_align_row = ttk.Frame(preprocess)
-        preprocess_align_row.grid(row=5, column=0, sticky="ew", pady=(4, 0))
-        ttk.Label(preprocess_align_row, text="内容框排版 X：").pack(side="left")
-        align_x_combo = ttk.Combobox(
-            preprocess_align_row,
-            textvariable=self.preprocess_export_align_x_var,
-            values=("左对齐", "居中", "右对齐"),
-            state="readonly",
-            width=8,
-        )
-        align_x_combo.pack(side="left")
-        align_x_combo.bind(
-            "<<ComboboxSelected>>", self._preprocess_export_settings_changed
-        )
-        ttk.Label(preprocess_align_row, text="Y：").pack(side="left", padx=(8, 2))
-        align_y_combo = ttk.Combobox(
-            preprocess_align_row,
-            textvariable=self.preprocess_export_align_y_var,
-            values=("顶端对齐", "居中", "底部对齐"),
-            state="readonly",
-            width=8,
-        )
-        align_y_combo.pack(side="left")
-        align_y_combo.bind(
-            "<<ComboboxSelected>>", self._preprocess_export_settings_changed
-        )
-        ttk.Label(
-            preprocess_align_row,
-            text="内容框在版心内排版；不足部分填白",
-            style="PC.FieldLabel.TLabel",
-        ).pack(side="left", padx=(10, 0))
-
-        preprocess_export_row = ttk.Frame(preprocess)
-        preprocess_export_row.grid(row=6, column=0, sticky="ew", pady=(4, 0))
-        for col in range(3):
-            preprocess_export_row.columnconfigure(
-                col, weight=1, uniform="preprocess-export"
-            )
-        ttk.Button(
-            preprocess_export_row, text="导出检查小图",
-            command=self.export_preprocess_previews,
-            style="PC.Compact.TButton",
-        ).grid(row=0, column=0, sticky="ew")
-        ttk.Button(
-            preprocess_export_row, text="导出预处理图片",
-            command=self.export_preprocess_images,
-            style="PC.Compact.TButton",
-        ).grid(row=0, column=1, sticky="ew", padx=(4, 0))
-        promote_button = ttk.Button(
-            preprocess_export_row, text="所选设为工作图片",
-            command=self.promote_preprocessed_working_images,
-            style="PC.Compact.TButton",
-        )
-        promote_button.grid(row=0, column=2, sticky="ew", padx=(4, 0))
-        self._attach_tooltip(
-            promote_button,
-            "仅处理当前页面范围：所选页需已有 processed 导出。原扫描图"
-            "逐批移动到 __before__，处理后图片以原文件名成为后续工作图片；"
-            "未选页面保持不变，__before__ 中同名原图绝不覆盖。",
-        )
-
-        self._attach_tooltip(
-            self.preprocess_mode_button,
-            "进入后锁定画线/OCR/SECTION/后期制作，只保留预处理、翻页和缩放。原扫描图不会被覆盖。",
-        )
-
-        normal = self._section_frame(
-            parent,
-            "一、版面参数",
-            padding=5,
-            section_key="normal",
-        )
-        normal.pack(fill="x")
-        add_field(normal, 0, 0, "正文栏数：", "columns", int)
-        add_field(normal, 0, 2, "正文起始Y：", "start_y", float)
-        add_field(normal, 0, 4, "首栏X：", "manual_x", float)
-        add_field(normal, 1, 0, "单栏宽：", "column_width", float)
-        add_field(normal, 1, 2, "栏间空：", "gutter", float)
-        # Shared, live percent/pixel fields for the compact Layout panel.
-        # Legacy widgets stay hidden but remain the canonical Tk state owners.
-        for field_row, caption, name in (
-            (3, "典型单行字高：", "character_height"),
-            (4, "典型行间空白：", "row_padding"),
-            (5, "正文缩进：", "body_indent"),
-            (6, "微调判据：", "horizontal_tolerance"),
-        ):
-            add_field(normal, field_row, 0, caption, name, float)
-
-        row = ttk.Frame(normal); row.grid(row=2, column=0, columnspan=8, sticky="ew", pady=(4, 0))
-        detect_layout_button = ttk.Button(
-            row, text="检测版面参数", command=self.detect_layout_current,
-            style="PC.Compact.TButton",
-        )
-        detect_layout_button.pack(side="left", fill="x", expand=True)
-        self._attach_tooltip(
-            detect_layout_button,
-            "若所选页面数量≥2，参数为稳健中位数",
-        )
-        consistency_button = ttk.Button(
-            row, text="检测版面一致性", command=self.detect_layout_consistency_selected,
-            style="PC.Compact.TButton",
-        )
-        consistency_button.pack(side="left", fill="x", expand=True, padx=(5, 0))
-        self._attach_tooltip(
-            consistency_button,
-            "快速扫描所选至少 2 页的页眉边界和正文左缘，生成一致性报告；不修改版面参数。",
-        )
-        ordinary_settings_button = ttk.Button(
-            row, text="普通画线设置…",
-            command=lambda: self.open_settings(initial_tab="normal"),
-            style="PC.Compact.TButton",
-        )
-        ordinary_settings_button.pack(side="left", fill="x", expand=True, padx=(5, 0))
-        self._attach_tooltip(
-            ordinary_settings_button,
-            "打开普通画线的专属参数；融合模式会直接复用这些几何参数。",
-        )
-        for col in (1, 3, 5, 7): normal.columnconfigure(col, weight=1)
-
-        aux = self._section_frame(parent, "二、显示设置", padding=5, section_key="aux")
-        aux.pack(fill="x", pady=(4, 0))
-        ruler_var = tk.BooleanVar(value=bool(self.settings.show_rulers))
-        section_var = tk.BooleanVar(value=bool(self.settings.show_page_sections))
-        guide_var = tk.BooleanVar(value=bool(self.settings.show_column_guides))
-        marker_var = tk.BooleanVar(value=bool(self.settings.show_headword_markers))
-        self.quick_bool_vars["show_rulers"] = ruler_var
-        self.quick_bool_vars["show_page_sections"] = section_var
-        self.quick_bool_vars["show_column_guides"] = guide_var
-        self.quick_bool_vars["show_headword_markers"] = marker_var
-        self.quick_color_buttons: dict[str, tk.Button] = {}
-        self.quick_color_vars: dict[str, tk.StringVar] = {
-            "ruler_color": tk.StringVar(value=self.settings.ruler_color),
-            "page_section_color": tk.StringVar(value=self.settings.page_section_color),
-            "guide_color": tk.StringVar(value=self.settings.guide_color),
-            "headword_marker_color": tk.StringVar(value=self.settings.headword_marker_color),
-            "illustration_outline_color": tk.StringVar(value=self.settings.illustration_outline_color),
-            "illustration_fill_color": tk.StringVar(value=self.settings.illustration_fill_color),
-            "illustration_label_border_color": tk.StringVar(value=self.settings.illustration_label_border_color),
-            "illustration_label_fill_color": tk.StringVar(value=self.settings.illustration_label_fill_color),
-            "main_entry_default_color": tk.StringVar(value=self.settings.main_entry_default_color),
-        }
-
-        def color_button(row: ttk.Frame, name: str) -> tk.Button:
-            button = tk.Button(row, text="", width=2, padx=0, pady=0, bd=1, highlightthickness=0)
-            button.configure(command=lambda n=name, b=button: self.choose_overlay_color(n, b))
-            button.pack(side="left", padx=(2, 5), fill="y")
-            self.quick_color_buttons[name] = button
-            self._style_color_button(button, str(self.quick_color_vars[name].get()))
-            color_tips = {
-                "ruler_color": "选择标尺线和刻度数字颜色。",
-                "page_section_color": "选择 SECTION 边界线颜色。",
-                "guide_color": "选择栏左垂线颜色。",
-                "headword_marker_color": "选择词头横线颜色。",
-                "illustration_outline_color": "选择插图轮廓颜色。",
-                "illustration_fill_color": "选择插图区域背景色。",
-                "illustration_label_border_color": "选择插图标签外框颜色。",
-                "illustration_label_fill_color": "选择插图标签背景色。",
-                "main_entry_default_color": "选择主画布词条文本框默认背景色。",
-            }
-            self._attach_tooltip(button, color_tips.get(name, "点击选择颜色。"))
-            return button
-
-        section_row = ttk.Frame(aux); section_row.grid(row=0, column=0, columnspan=4, sticky="ew")
-        ttk.Checkbutton(
-            section_row, text="显示标尺", variable=ruler_var,
-            command=lambda: self._apply_overlay_visibility_toggle("show_rulers", ruler_var),
-        ).pack(side="left")
-        color_button(section_row, "ruler_color")
-        ttk.Checkbutton(
-            section_row, text="显示Section", variable=section_var,
-            command=lambda: self._apply_overlay_visibility_toggle("show_page_sections", section_var),
-        ).pack(side="left", padx=(6, 0))
-        color_button(section_row, "page_section_color")
-        ttk.Label(section_row, text="粗细：").pack(side="left")
-        section_width_var = tk.StringVar(value=str(self.settings.page_section_width))
-        self.quick_vars["page_section_width"] = section_width_var
-        self.quick_field_casts["page_section_width"] = int
-        ttk.Entry(
-            section_row, textvariable=section_width_var, width=4, justify="left"
-        ).pack(side="left", padx=(2, 10))
-        add_ocr_crop_preview_control(self, section_row)
-
-        line_row = ttk.Frame(aux); line_row.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(2, 0))
-        ttk.Checkbutton(line_row, text="栏左垂线", variable=guide_var, command=self._quick_parameter_changed).pack(side="left")
-        color_button(line_row, "guide_color")
-        ttk.Label(line_row, text="宽度：").pack(side="left")
-        guide_value = tk.StringVar(value=str(self.settings.guide_width)); self.quick_vars["guide_width"] = guide_value; self.quick_field_casts["guide_width"] = int
-        ttk.Entry(
-            line_row, textvariable=guide_value, width=5, justify="left"
-        ).pack(side="left", padx=(2, 10))
-        add_quick_opacity_control(self, line_row, name="guide_opacity")
-        ttk.Checkbutton(line_row, text="插图形状：轮廓", variable=self.polygon_var, command=self.redraw).pack(side="left")
-        color_button(line_row, "illustration_outline_color")
-        ttk.Label(line_row, text="粗细").pack(side="left")
-        outline_width_var = tk.StringVar(value=str(self.settings.illustration_outline_width)); self.quick_vars["illustration_outline_width"] = outline_width_var; self.quick_field_casts["illustration_outline_width"] = int
-        ttk.Entry(
-            line_row, textvariable=outline_width_var, width=4, justify="left"
-        ).pack(side="left", padx=(2, 5))
-        ttk.Label(line_row, text="背景").pack(side="left")
-        color_button(line_row, "illustration_fill_color")
-        add_quick_illustration_fill_opacity_control(self, line_row)
-
-        marker_row = ttk.Frame(aux); marker_row.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(2, 0))
-        ttk.Checkbutton(marker_row, text="词头横线", variable=marker_var, command=self._quick_parameter_changed).pack(side="left")
-        color_button(marker_row, "headword_marker_color")
-        ttk.Label(marker_row, text="高度：").pack(side="left")
-        marker_value = tk.StringVar(value=str(self.settings.marker_height)); self.quick_vars["marker_height"] = marker_value; self.quick_field_casts["marker_height"] = int
-        ttk.Entry(
-            marker_row, textvariable=marker_value, width=5, justify="left"
-        ).pack(side="left", padx=(2, 10))
-        add_quick_opacity_control(self, marker_row, name="headword_marker_opacity")
-        label_visible_var = tk.BooleanVar(value=bool(self.settings.show_illustration_labels))
-        self.quick_bool_vars["show_illustration_labels"] = label_visible_var
-        ttk.Checkbutton(marker_row, text="显示插图标签", variable=label_visible_var, command=lambda: self._apply_overlay_visibility_toggle("show_illustration_labels", label_visible_var)).pack(side="left")
-        color_button(marker_row, "illustration_label_border_color")
-        ttk.Label(marker_row, text="粗细").pack(side="left")
-        label_width_var = tk.StringVar(value=str(self.settings.illustration_label_border_width)); self.quick_vars["illustration_label_border_width"] = label_width_var; self.quick_field_casts["illustration_label_border_width"] = int
-        ttk.Entry(
-            marker_row, textvariable=label_width_var, width=4, justify="left"
-        ).pack(side="left", padx=(2, 5))
-        ttk.Label(marker_row, text="背景").pack(side="left")
-        color_button(marker_row, "illustration_label_fill_color")
-
-        entry_row = ttk.Frame(aux); entry_row.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(2, 0))
-        ttk.Label(entry_row, text="词条文本框：宽度(字符)").pack(side="left")
-        for name, width in (("main_entry_width_chars", 5), ("main_entry_x_ratio", 5)):
-            shown = getattr(self.settings, name) * 100 if name == "main_entry_x_ratio" else getattr(self.settings, name)
-            var = tk.StringVar(value=str(round(shown) if name == "main_entry_x_ratio" else shown)); self.quick_vars[name] = var; self.quick_field_casts[name] = int  # Both width and displayed offset% are integers.
-            if name == "main_entry_x_ratio": ttk.Label(entry_row, text="偏移%").pack(side="left", padx=(8, 2))
-            ttk.Entry(
-                entry_row, textvariable=var, width=width, justify="left"
-            ).pack(side="left")
-        follow_var = tk.BooleanVar(value=bool(self.settings.main_entry_follow_zoom)); self.quick_bool_vars["main_entry_follow_zoom"] = follow_var
-        ttk.Checkbutton(entry_row, text="跟随缩放", variable=follow_var).pack(side="left", padx=(8, 0))
-        ttk.Label(entry_row, text="默认").pack(side="left", padx=(8, 0))
-        color_button(entry_row, "main_entry_default_color")
-
-        font_row = ttk.Frame(aux); font_row.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(2, 0))
-        ttk.Label(font_row, text="词条字体").pack(side="left")
-        family_var = tk.StringVar(value=normalize_content_font_setting(self.settings.main_entry_font_family)); self.quick_vars["main_entry_font_family"] = family_var; self.quick_field_casts["main_entry_font_family"] = str
-        content_font_values = (AUTO_FONT_FAMILY, *tuple(sorted(set(font.families()), key=str.casefold)))
-        ttk.Combobox(font_row, textvariable=family_var, values=content_font_values, width=18).pack(side="left")
-        ttk.Label(font_row, text="字号").pack(side="left", padx=(8, 2))
-        size_var = tk.StringVar(value=str(self.settings.main_entry_font_size)); self.quick_vars["main_entry_font_size"] = size_var; self.quick_field_casts["main_entry_font_size"] = int
-        ttk.Entry(
-            font_row, textvariable=size_var, width=5, justify="left"
-        ).pack(side="left")
-        for label, name in (("粗体", "main_entry_font_bold"), ("斜体", "main_entry_font_italic")):
-            var = tk.BooleanVar(value=bool(getattr(self.settings, name))); self.quick_bool_vars[name] = var
-            ttk.Checkbutton(font_row, text=label, variable=var).pack(side="left", padx=(7, 0))
-
-        label_font_row = ttk.Frame(aux); label_font_row.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(2, 0))
-        ttk.Label(label_font_row, text="标签字体").pack(side="left")
-        label_family_var = tk.StringVar(value=normalize_content_font_setting(self.settings.illustration_label_font_family)); self.quick_vars["illustration_label_font_family"] = label_family_var; self.quick_field_casts["illustration_label_font_family"] = str
-        ttk.Combobox(label_font_row, textvariable=label_family_var, values=content_font_values, width=18).pack(side="left")
-        ttk.Label(label_font_row, text="字号").pack(side="left", padx=(8, 2))
-        label_size_var = tk.StringVar(value=str(self.settings.illustration_label_font_size)); self.quick_vars["illustration_label_font_size"] = label_size_var; self.quick_field_casts["illustration_label_font_size"] = int
-        ttk.Entry(
-            label_font_row, textvariable=label_size_var, width=5, justify="left"
-        ).pack(side="left")
-        for label, name in (("粗体", "illustration_label_font_bold"), ("斜体", "illustration_label_font_italic")):
-            var = tk.BooleanVar(value=bool(getattr(self.settings, name))); self.quick_bool_vars[name] = var
-            ttk.Checkbutton(label_font_row, text=label, variable=var).pack(side="left", padx=(7, 0))
-
-        from .crop_preview_display_settings import add_crop_preview_font_controls
-        add_crop_preview_font_controls(self, aux, content_font_values, normalize_content_font_setting)
-
-        ocr_display_row = ttk.Frame(aux); ocr_display_row.grid(row=6, column=0, columnspan=4, sticky="ew")
-        for label, name in (("显示OCR内容选择", "review_main_show_ocr_choices"), ("显示OCR对比底色结果", "review_main_show_ocr_background")):
-            var = tk.BooleanVar(value=bool(getattr(self.settings, name))); self.quick_bool_vars[name] = var
-            ttk.Checkbutton(
-                ocr_display_row, text=label, variable=var,
-                command=lambda n=name, v=var: self._apply_overlay_visibility_toggle(n, v),
-            ).pack(side="left", padx=(0, 8))
-
-        candidate_var = tk.BooleanVar(value=bool(self.settings.paddle_show_candidate_checkboxes)); self.quick_bool_vars["paddle_show_candidate_checkboxes"] = candidate_var
-        ttk.Checkbutton(
-            ocr_display_row, text="显示单行候选框", variable=candidate_var,
-            command=lambda: self._apply_overlay_visibility_toggle(
-                "paddle_show_candidate_checkboxes", candidate_var,
-            ),
-        ).pack(side="left", padx=(0, 8))
-
-        option_row = ttk.Frame(aux); option_row.grid(row=7, column=0, columnspan=4, sticky="ew")
-        ttk.Checkbutton(
-            option_row, text="隐藏线框(插图除外)", variable=self.hide_var,
-            command=self._toggle_hide_overlays,
-        ).pack(side="left")
-        ttk.Label(option_row, text="显示模式：").pack(side="left", padx=(10, 2))
-        display_mode_combo = ttk.Combobox(
-            option_row,
-            textvariable=self.display_mode_var,
-            values=("原图+标注", "二值+标注", "仅原图", "仅二值", "切图预览"),
-            state="readonly",
-            width=10,
-        )
-        display_mode_combo.pack(side="left", padx=(0, 8))
-        display_mode_combo.bind("<<ComboboxSelected>>", self._apply_display_mode)
-        ttk.Label(option_row, text="颜色模式：").pack(side="left")
-        appearance_combo = ttk.Combobox(
-            option_row, textvariable=self.appearance_mode_var,
-            values=tuple(APPEARANCE_MODE_VALUES), state="readonly", width=8,
-        )
-        appearance_combo.pack(side="left")
-        appearance_combo.bind("<<ComboboxSelected>>", self._appearance_mode_selected)
-        self._attach_tooltip(
-            appearance_combo,
-            "浅色=正常界面；深色=夜间界面；跟随系统=自动响应 Windows/macOS/Linux 的系统颜色模式。",
-        )
-        save_row = ttk.Frame(aux); save_row.grid(row=8, column=0, columnspan=4, sticky="ew")
-        ttk.Checkbutton(save_row, text="自动保存", variable=self.autosave_var, command=self.toggle_autosave).pack(side="left")
-        ttk.Label(save_row, text="间隔时间(秒)").pack(side="left", padx=(8, 2))
-        interval_var = tk.StringVar(value=str(round(float(self.settings.batch_interval)))); self.quick_vars["batch_interval"] = interval_var; self.quick_field_casts["batch_interval"] = int
-        ttk.Entry(
-            save_row, textvariable=interval_var, width=6, justify="left"
-        ).pack(side="left")
-        ttk.Label(save_row, text="向右比例%").pack(side="left", padx=(10, 2))
-        ratio_var = tk.StringVar(value=str(self.settings.right_ratio)); self.quick_vars["right_ratio"] = ratio_var; self.quick_field_casts["right_ratio"] = float
-        ttk.Entry(
-            save_row, textvariable=ratio_var, width=6, justify="left"
-        ).pack(side="left")
-
-        aux.columnconfigure(1, weight=1); aux.columnconfigure(3, weight=1)
-        add_layout_visualization_controls(self, aux)
-
-        ocr = self._section_frame(parent, "三、共享 OCR 通道 / OCR画线", padding=5, section_key="ocr")
-        ocr.pack(fill="x", pady=(4, 0))
-        self.ocr_refresh_var = tk.StringVar(value="reuse")
-        ttk.Label(ocr, text="识别策略：").grid(row=0, column=0, sticky="w")
-        ttk.Radiobutton(
-            ocr, text="使用有效缓存（推荐）",
-            variable=self.ocr_refresh_var, value="reuse",
-        ).grid(row=0, column=1, columnspan=2, sticky="w")
-        ttk.Radiobutton(
-            ocr, text="重新OCR（模型/图像改变时）",
-            variable=self.ocr_refresh_var, value="force",
-        ).grid(row=0, column=3, columnspan=3, sticky="w")
-        add_field(ocr, 1, 0, "OCR语言：", "ocr_language", str, 8)
-        add_field(ocr, 1, 2, "识别带宽%：", "paddle_band_width_ratio", float, 7)
-        add_field(ocr, 1, 4, "左缘容差：", "paddle_left_tolerance", int, 7)
-        engine_row = ttk.Frame(ocr); engine_row.grid(row=2, column=0, columnspan=6, sticky="ew", pady=(4, 1))
-        ttk.Label(engine_row, text="OCR引擎：").pack(side="left")
-        for text, name in (("PaddleOCR", "paddle_use_paddleocr"), ("Tesseract", "paddle_compare_tesseract"), ("Google Lens", "paddle_enable_lens")):
-            var = tk.BooleanVar(value=bool(getattr(self.settings, name))); self.quick_bool_vars[name] = var
-            ttk.Checkbutton(engine_row, text=text, variable=var).pack(side="left", padx=(0, 5))
-        self.lens_mode_var = tk.StringVar(
-            value=LENS_MODE_LABELS.get(self.settings.paddle_lens_mode, LENS_MODE_LABELS["off"])
-        )
-        lens_row = ttk.Frame(ocr); lens_row.grid(row=3, column=0, columnspan=6, sticky="ew")
-        ttk.Label(lens_row, text="Lens模式：").pack(side="left")
-        ttk.Combobox(
-            lens_row, textvariable=self.lens_mode_var, values=tuple(LENS_MODE_VALUES),
-            state="readonly", width=34,
-        ).pack(side="left", fill="x", expand=True)
-        ttk.Label(lens_row, text="  Y安全空间：").pack(side="left")
-        safety_var = tk.StringVar(value=str(self.settings.paddle_separator_safety_px))
-        self.quick_vars["paddle_separator_safety_px"] = safety_var
-        self.quick_field_casts["paddle_separator_safety_px"] = int
-        ttk.Entry(
-            lens_row, textvariable=safety_var, width=4, justify="left"
-        ).pack(side="left", padx=(2, 2))
-        ttk.Label(lens_row, text="px").pack(side="left")
-        ocr_tools = ttk.Frame(ocr)
-        ocr_tools.grid(row=4, column=0, columnspan=6, sticky="ew", pady=(4, 0))
-        environment_button = ttk.Button(
-            ocr_tools, text="环境中心", command=self.check_ocr_engines,
-            style="PC.Compact.TButton",
-        )
-        environment_button.pack(side="left", fill="x", expand=True)
-        self._attach_tooltip(
-            environment_button,
-            "检查 PaddleOCR / PaddlePaddle、Tesseract、Lens、OpenCC 等运行环境。",
-        )
-        ocr_settings_button = ttk.Button(
-            ocr_tools, text="OCR画线设置…",
-            command=lambda: self.open_settings(initial_tab="ocr"),
-            style="PC.Compact.TButton",
-        )
-        ocr_settings_button.pack(side="left", fill="x", expand=True, padx=(5, 0))
-        self._attach_tooltip(
-            ocr_settings_button,
-            "打开 OCR画线参数和高级候选规则；建议先在代表页确认具体错误模式。",
-        )
-        for col in (1, 3, 5): ocr.columnconfigure(col, weight=1)
-
-        actions = self._section_frame(
-            parent, "四、画线 / OCR / 插图 / 校对",
-            padding=5, section_key="actions",
-        )
-        actions.pack(fill="x", pady=(4, 0))
-        action_tooltips = {
-            "普通画线": "只运行高速左缘几何画线；适合正文缩进稳定的词典，不调用 OCR 来决定词条位置。",
-            "仅OCR": "只对已有画线调用共享 OCR 通道做局部文字识别；普通行与大字行使用不同高度框，不新增、删除或移动画线，默认仅填空白词条。",
-            "融合画线+OCR": "普通几何与 OCR 候选先融合、救漏和去重，再对仍为空白的普通救漏线自动做局部 OCR 补字。",
-            "OCR画线(默认)": "默认画线方式：由 OCR / parser / 视觉候选链识别词头并确定画线，同时得到 OCR 文字。",
-            "清除画线": "清除当前页全部词条画线；不会删除扫描图片。",
-            "清除文本": "清空当前页画线中的词条文字，但保留画线位置。",
-            "精修画线": "仅在所选范围微调已有画线的 Y 位置，不新增或删除词条。",
-            "新旧比较": "比较所选范围当前 PDIC 与页码-词条文本，定位新增、缺失或顺序差异。",
-            "词条校对": "打开连续校对窗口，结合扫描图、OCR候选、简体和参考词表逐条核对。",
-            "选择词条文件": "选择带页码的既有词条 TXT，供后续【填充词条】重复使用。",
-            "填充词条": "按当前页面范围，用已选页码词条文件填充对应 PDIC 词条文本。",
-            "修复排序": "按栏号 → Y 修复所选范围 PDIC 记录顺序；不重新 OCR、不改变词条坐标配对。",
-            "备份PDIC": "将项目现有 PDIC 汇总为时间戳备份，适合批量修改前留档。",
-            "恢复PDIC": "从备份文本覆盖恢复主界面所选范围的 PDIC；执行前请确认页面范围。",
-            "插图识别": "在所选页面范围自动识别插图并写入 PPP；人工多边形会保留。",
-            "编辑插图": "进入/退出插图多边形编辑模式，可新增、移动顶点并修改标签。",
-            "压缩OCR缓存": "压缩当前页面范围的 PaddleOCR 缓存并删除可再生诊断副本；保留可复用 OCR 原始记录和人工选择，不需要重新 OCR。",
-            "保存当前页": "立即保存当前页的画线/词条或插图编辑结果。",
-        }
-        rows = [
-            (
-                ("普通画线", self.run_normal_draw_action),
-                ("仅OCR", self.ocr_ordinary_lines_text_selected_scope),
-                ("融合画线+OCR", self.run_combined_draw_action),
-                ("OCR画线(默认)", self.run_ocr_draw_action),
-            ),
-            (("清除画线", self.clear_entries), ("清除文本", self.clear_text), ("精修画线", self.refine_lines_selected_scope), ("新旧比较", self.compare_old_new_selected_scope), ("词条校对", self.open_review)),
-            (("选择词条文件", self.select_existing_headwords_file), ("填充词条", self.fill_existing_headwords), ("修复排序", self.repair_pdic_order_selected_scope), ("备份PDIC", self.backup_pdic), ("恢复PDIC", self.restore_from_pdic_backup)),
-            (
-                ("插图识别", self.detect_illustrations_selected_scope),
-                ("编辑插图", self.toggle_polygon_drawing),
-                ("压缩OCR缓存", self.cleanup_paddleocr_temp_selected_scope),
-                ("保存当前页", self.save_current_page),
-            ),
-        ]
-        for ri, specs in enumerate(rows):
-            row = ttk.Frame(actions)
-            row.grid(row=ri, column=0, sticky="ew", pady=(0 if ri == 0 else 3, 0))
-            for bi in range(len(specs)):
-                row.columnconfigure(bi, weight=1, uniform=f"actions-row-{ri}")
-            for bi, (text, command) in enumerate(specs):
-                role = (
-                    "primary" if text == "OCR画线(默认)"
-                    else "success" if text == "保存当前页"
-                    else "primary" if text == "词条校对"
-                    else "neutral"
-                )
-                button = self._sidebar_action_button(row, text, command, role=role)
-                tooltip = action_tooltips.get(text)
-                if tooltip:
-                    self._attach_tooltip(button, tooltip)
-                if text == "编辑插图":
-                    self.polygon_draw_button = button
-                button.grid(
-                    row=0, column=bi, sticky="ew",
-                    padx=(0 if bi == 0 else 4, 0),
-                )
-        actions.columnconfigure(0, weight=1)
-        aux_row = ttk.Frame(actions)
-        aux_row.grid(row=len(rows), column=0, sticky="w", pady=3)
-        ttk.Checkbutton(aux_row, text="辅助线模式", variable=self.auxiliary_mode_var,
-                        command=self.toggle_auxiliary_mode).pack(side="left")
-        ttk.Button(aux_row, text="撤销辅助线",
-                   command=self._auxiliary_controller.undo).pack(side="left", padx=8)
-
-        postproduction = self._section_frame(
-            parent, "五、后期词典制作", padding=5, section_key="postproduction"
-        )
-        postproduction.pack(fill="x", pady=(4, 0))
-        production_tooltips = {
-            "画线行导出": (
-                "将【选定范围】内各页按校对界面相同的单行裁切逻辑批量输出到 QT/PSW；"
-                "可在【设置中心 → 切图】选择是否按页合并，并复用切图并行进程数。"
-            ),
-            "未画线行导出": (
-                "将【选定范围】内 Layout 已恢复、但当前 PDIC 没有横线的文字行导出到 QT/PSW_UNLINED。"
-                "可在【设置中心 → 切图】启用【未画线行导出过滤 → 空白】只检查近空白候选；"
-                "不以 entry/body 角色决定是否导出，并复用按页合并和切图并行进程设置。"
-            ),
-            "词条切图": "按所选页面范围和【设置中心 → 切图】生成完整词条切图。",
-            "插图切图": "按所选范围导出需要独立输出的 PPP 插图。",
-            "项目详情": "编辑词典名称、语言、正文页码范围等项目级元数据。",
-            "导出PicDic索引": "从项目已保存 PDIC 导出“词条 / X% / Y% / 页码”文本索引。",
-            "PicDic制作": "使用已生成的词条切图制作 PicDic DSL 与图片包。",
-            "导出训练标记包": "导出已人工确认的 PDIC/PPP、OCR候选和坐标上下文，供模型或规则验证。",
-        }
-        production_rows = [
-            (("画线行导出", self.split_single_lines_selected_scope), ("未画线行导出", self.export_unlined_rows_selected_scope), ("词条切图", self.split_entries_selected_scope), ("插图切图", self.split_illustrations_selected_scope)),
-            (("项目详情", self.open_project_details), ("导出PicDic索引", self.export_picdic_index), ("PicDic制作", self.build_picdic)),
-            (("导出训练标记包", self.export_training_package),),
-        ]
-        for ri, specs in enumerate(production_rows):
-            row = ttk.Frame(postproduction)
-            row.grid(row=ri, column=0, sticky="ew", pady=(0 if ri == 0 else 3, 0))
-            for bi in range(len(specs)):
-                row.columnconfigure(bi, weight=1, uniform=f"postproduction-row-{ri}")
-            for bi, (text, command) in enumerate(specs):
-                button = self._sidebar_action_button(row, text, command)
-                if text == "画线行导出":
-                    self._pc_single_line_crop_button = button
-                elif text == "未画线行导出":
-                    self._pc_unlined_export_button = button
-                tooltip = production_tooltips.get(text)
-                if tooltip:
-                    self._attach_tooltip(button, tooltip)
-                button.grid(
-                    row=0, column=bi, sticky="ew",
-                    padx=(0 if bi == 0 else 4, 0),
-                )
-        postproduction.columnconfigure(0, weight=1)
-
-        # Main-panel parameters are live: after a short debounce, valid values
-        # are applied and persisted without requiring a separate Apply step.
-        for _name, _var in self.quick_vars.items():
-            try:
-                if _name in self.quick_pixel_vars:
-                    _var.trace_add(
-                        "write",
-                        lambda *_args, n=_name: self._quick_percent_parameter_changed(n),
-                    )
-                else:
-                    _var.trace_add("write", lambda *_args: self._quick_parameter_changed())
-            except Exception:
-                pass
-        for _name, _var in self.quick_pixel_vars.items():
-            try:
-                _var.trace_add(
-                    "write",
-                    lambda *_args, n=_name: self._quick_pixel_parameter_changed(n),
-                )
-            except Exception:
-                pass
-        for _var in self.quick_bool_vars.values():
-            try:
-                _var.trace_add("write", lambda *_args: self._quick_parameter_changed())
-            except Exception:
-                pass
-        self.lens_mode_var.trace_add("write", lambda *_args: self._quick_parameter_changed())
-        self._quick_trace_ready = True
 
     def _preprocess_mode_active(self) -> bool:
         return bool(
@@ -11482,7 +10960,7 @@ class PictureCaptureApp(tk.Tk):
             return None
         self.save_pdic(silent=True, sync_editors=sync_editors)
         ppp = self._ppp_write_path(self.current_page)
-        write_ppp(ppp, self.polygons, self.current_page.stem)
+        self._save_normalized_ppp()
         self._update_page_row(self.current_index)
         return pdic_path(self.current_page), ppp
 
@@ -11492,7 +10970,7 @@ class PictureCaptureApp(tk.Tk):
             return None
         if self.polygon_draw_var.get() and not getattr(self, "_batch_allow_pdic_edits", False):
             target = self._ppp_write_path(self.current_page)
-            write_ppp(target, self.polygons, self.current_page.stem)
+            self._save_normalized_ppp()
             self._update_page_row(self.current_index)
             return target
         self.save_pdic(silent=True, sync_editors=sync_editors)
@@ -11716,6 +11194,8 @@ class PictureCaptureApp(tk.Tk):
         if not self.project: return []
         mode = self.page_range_var.get() if hasattr(self, "page_range_var") else "current"
         if mode == "current": return [self.current_index] if self.current_index >= 0 else []
+        if mode == "bookmarks":
+            return bookmarked_page_indices(self.project.images, self._bookmark_stems())
         if mode == "to_end": return list(range(max(0, self.current_index), len(self.project.images)))
         if mode == "to_specified":
             indices = self._parse_page_spec(self.page_range_spec_var.get())
@@ -11954,6 +11434,9 @@ class PictureCaptureApp(tk.Tk):
         if self._batch_active:
             messagebox.showinfo("批量任务正在运行", "已有批量任务正在运行，请先暂停或停止。", parent=self)
             return False
+        if self._ui_worker_key_active("crop-width-normalization"):
+            self.status_var.set("PNG 宽度标准化仍在运行；请先完成或停止。")
+            return False
         if self._ui_worker_key_active("project-load"):
             self.status_var.set("项目仍在后台打开；完成后再启动批量任务。")
             return False
@@ -12059,10 +11542,15 @@ class PictureCaptureApp(tk.Tk):
         self, title: str, items, worker_func, job_builder, result_consumer=None,
         on_done=None, item_label=None, max_workers: int = 0,
         *, allow_page_navigation: bool = False, allow_pdic_edits: bool = False,
+        foreground_page_edit: bool = False, page_indexer=None,
+        gpu_preflight_func=None, gpu_job_builder=None,
     ) -> bool:
-        """ start parallel batch task."""
+        """Run bounded page jobs; optional one-process GPU preflight before CPU."""
         if self._batch_active:
             messagebox.showinfo("批量任务正在运行", "已有批量任务正在运行，请先暂停或停止。", parent=self)
+            return False
+        if self._ui_worker_key_active("crop-width-normalization"):
+            self.status_var.set("PNG 宽度标准化仍在运行；请先完成或停止。")
             return False
         if self._ui_worker_key_active("project-load"):
             self.status_var.set("项目仍在后台打开；完成后再启动批量任务。")
@@ -12084,7 +11572,7 @@ class PictureCaptureApp(tk.Tk):
         workers = resolve_crop_worker_count(max_workers)
         # A one-worker request is intentionally routed through the existing
         # sequential runner, useful for low-memory machines and diagnostics.
-        if workers <= 1:
+        if workers <= 1 and gpu_preflight_func is None:
             def serial_worker(item, position, total):
                 args = job_builder(item, position, total)
                 raw = worker_func(*args)
@@ -12093,12 +11581,22 @@ class PictureCaptureApp(tk.Tk):
                 title, items, serial_worker, on_done, item_label,
                 allow_page_navigation=allow_page_navigation,
                 allow_pdic_edits=allow_pdic_edits,
+                foreground_page_edit=foreground_page_edit,
+                page_indexer=page_indexer,
             )
 
         self._batch_active = True
         self._batch_parallel = True
         self._batch_allow_page_navigation = bool(allow_page_navigation)
         self._batch_allow_pdic_edits = bool(allow_pdic_edits)
+        self._batch_foreground_pages = bool(foreground_page_edit)
+        self._batch_skipped_count = 0
+        page_id = page_indexer or (lambda item: int(item))
+        with self._batch_state_lock:
+            self._batch_page_states = (
+                {page_id(item): "pending" for item in items}
+                if foreground_page_edit else {}
+            )
         self._batch_title = title
         self._batch_on_done = on_done
         self._batch_stop_event.clear()
@@ -12112,8 +11610,19 @@ class PictureCaptureApp(tk.Tk):
         if not self.batch_bar.winfo_manager():
             self.batch_bar.pack(side="top", fill="x")
         self.status_var.set(
-            f"{title}开始：共 {len(items)} 页，CPU并行 {workers} 进程。暂停/停止不会再派发新页面。"
+            (f"{title}开始：一个 GPU 预检进程 + {workers} 个 CPU 处理进程；"
+             if gpu_preflight_func is not None else
+             f"{title}开始：共 {len(items)} 页，CPU并行 {workers} 进程。")
+            + "暂停/停止不会再派发新页面。"
+            + (" 可校对其他待处理页；手工锁定页面将安全跳过。" if foreground_page_edit else "")
         )
+
+        if foreground_page_edit:
+            for item in items:
+                try:
+                    self._update_page_row(page_id(item))
+                except Exception:
+                    pass
 
         try:
             while True:
@@ -12131,6 +11640,10 @@ class PictureCaptureApp(tk.Tk):
             futures = {}
             context = multiprocessing.get_context("spawn")
             executor = ProcessPoolExecutor(max_workers=workers, mp_context=context)
+            gpu_executor = (
+                ProcessPoolExecutor(max_workers=1, mp_context=context)
+                if gpu_preflight_func is not None else None
+            )
             try:
                 while True:
                     # Fill only the currently free worker slots. This is what
@@ -12144,10 +11657,47 @@ class PictureCaptureApp(tk.Tk):
                         item = items[next_index]
                         position = next_index + 1
                         label = labeler(item)
-                        args = job_builder(item, position, total)
-                        future = executor.submit(worker_func, *args)
-                        futures[future] = (item, position, label)
+                        item_index = page_id(item) if foreground_page_edit else None
                         next_index += 1
+                        if foreground_page_edit:
+                            # The same lock protects the foreground editor's
+                            # pending -> manual_locked claim. No submit, and
+                            # therefore no PDIC overwrite, after that claim.
+                            with self._batch_state_lock:
+                                state = self._batch_page_states.get(item_index, "pending")
+                                if state == "manual_locked":
+                                    self._batch_skipped_count += 1
+                                    completed += 1
+                                    self._batch_queue.put((
+                                        "skipped", completed, total, label, item_index
+                                    ))
+                                    continue
+                                self._batch_page_states[item_index] = "processing"
+                            self._batch_queue.put((
+                                "item", position, total, label, item_index
+                            ))
+                        args = job_builder(item, position, total)
+                        if gpu_executor is not None:
+                            if gpu_job_builder is None:
+                                raise RuntimeError("Missing GPU preflight job builder")
+                            # Exactly ONE long-lived model-owning spawn process
+                            # does each full Layout detector preflight. Never
+                            # initialize CUDA/Paddle inside the CPU workers.
+                            # This synchronous handoff intentionally bounds
+                            # in-flight pages to 1 GPU + <= workers CPU.
+                            gpu_args = gpu_job_builder(item, position, total)
+                            self._batch_queue.put((
+                                "pipeline_stage", position, total, label, "GPU版面预检",
+                            ))
+                            prepared = gpu_executor.submit(
+                                gpu_preflight_func, *gpu_args
+                            ).result()
+                            self._batch_queue.put((
+                                "pipeline_stage", position, total, label, "CPU画线与保存",
+                            ))
+                            args = (*args, prepared)
+                        future = executor.submit(worker_func, *args)
+                        futures[future] = (item, position, label, item_index)
                         self._batch_queue.put((
                             "parallel_state", completed, total, len(futures), label, workers
                         ))
@@ -12163,13 +11713,18 @@ class PictureCaptureApp(tk.Tk):
                     if not done_set:
                         continue
                     for future in done_set:
-                        item, _position, label = futures.pop(future)
+                        item, _position, label, item_index = futures.pop(future)
                         raw = future.result()
                         result = result_consumer(item, raw) if result_consumer is not None else raw
                         results.append(result)
                         completed += 1
+                        if foreground_page_edit:
+                            with self._batch_state_lock:
+                                if self._batch_page_states.get(item_index) == "processing":
+                                    self._batch_page_states[item_index] = "done"
                         self._batch_queue.put((
-                            "parallel_progress", completed, total, label, result, len(futures), workers
+                            "parallel_progress", completed, total, label, result,
+                            len(futures), workers, item_index
                         ))
 
                 self._batch_queue.put((
@@ -12182,6 +11737,8 @@ class PictureCaptureApp(tk.Tk):
                 ))
             finally:
                 executor.shutdown(wait=True, cancel_futures=True)
+                if gpu_executor is not None:
+                    gpu_executor.shutdown(wait=True, cancel_futures=True)
 
         self._batch_thread = threading.Thread(
             target=runner, name=f"PictureCapture-{title}-parallel", daemon=True
@@ -12243,6 +11800,15 @@ class PictureCaptureApp(tk.Tk):
                 else:
                     self.batch_text_var.set(f"{self._batch_title}：已完成 {completed}/{total}：{label}")
                     self.status_var.set(f"{self._batch_title}：已完成 {completed}/{total} 页，最近完成 {label}")
+            elif kind == "pipeline_stage":
+                _kind, position, total, label, stage = event
+                self.batch_text_var.set(
+                    f"{self._batch_title} {position}/{total}：{stage} · {label}"
+                )
+                self.status_var.set(
+                    f"{self._batch_title}：{stage}（{label}）；"
+                    "GPU模型只在一个进程中运行。"
+                )
             elif kind == "parallel_state":
                 _kind, completed, total, active, label, workers = event
                 self._batch_in_item = active > 0
@@ -12253,9 +11819,17 @@ class PictureCaptureApp(tk.Tk):
                     f"{self._batch_title}并行处理中：完成 {completed}/{total}，当前 {active} 页运行；最近派发 {label}"
                 )
             elif kind == "parallel_progress":
-                _kind, completed, total, label, _result, active, workers = event
+                _kind, completed, total, label, _result, active, workers, *page_ids = event
                 self._batch_in_item = active > 0
                 self.batch_progress_var.set(100.0 * completed / max(1, total))
+                if page_ids and page_ids[0] is not None:
+                    item_index = int(page_ids[0])
+                    self._update_page_row(item_index)
+                    if (item_index == self.current_index
+                            and self._foreground_batch_state(item_index) == "done"):
+                        # Reload the worker's saved PDIC instead of serializing
+                        # the stale foreground copy of the completed page.
+                        self.load_page(item_index)
                 if not self._batch_pause_event.is_set() and not self._batch_stop_event.is_set():
                     if active:
                         self.batch_text_var.set(
@@ -12336,7 +11910,7 @@ class PictureCaptureApp(tk.Tk):
             self.after_idle(self.on_close)
 
     def _hide_batch_bar_if_idle(self) -> None:
-        if not self._batch_active and self.batch_bar.winfo_manager():
+        if not self._batch_active and not self._ui_worker_key_active("crop-width-normalization") and self.batch_bar.winfo_manager():
             self.batch_bar.pack_forget()
 
     def _toggle_batch_pause(self) -> None:
@@ -12362,6 +11936,11 @@ class PictureCaptureApp(tk.Tk):
 
     def _request_batch_stop(self) -> None:
         if not self._batch_active:
+            cancel = getattr(self, "_crop_width_cancel_event", None)
+            if cancel is not None:
+                cancel.set()
+                self.batch_stop_button.configure(state="disabled")
+                self.status_var.set("PNG 宽度标准化：已请求取消，当前图片完成后停止")
             return
         self._batch_stop_event.set()
         # Wake a task that is currently paused so the worker can observe stop.
@@ -12393,6 +11972,12 @@ class PictureCaptureApp(tk.Tk):
     @staticmethod
     def _ppp_read_path(page: Path) -> Path:
         return ppp_read_path_for_image(page)
+
+    def _save_normalized_ppp(self) -> bool:
+        return self._illustration_controller_for_call().persist_current()
+
+    def associate_illustrations(self) -> None:
+        self._illustration_controller_for_call().associate_selected_scope()
 
     def reload_wordslist_reference(
         self, selected_path: Path | None = None, *, persist: bool = True, redraw: bool = True,
@@ -12965,7 +12550,7 @@ class PictureCaptureApp(tk.Tk):
                 self.apply_quick_settings(show_status=False, persist=True, silent_errors=True)
         if self.project and self.current_page and self.image is not None:
             self.save_pdic(silent=True)
-            write_ppp(self._ppp_write_path(self.current_page), self.polygons, self.current_page.stem)
+            self._save_normalized_ppp()
             self.settings.to_json(settings_path(self.project.root))
 
         migrate = False
@@ -13070,7 +12655,7 @@ class PictureCaptureApp(tk.Tk):
             if self.project and self.current_page and self.image is not None:
                 self._flush_deferred_page_save()
                 self.save_pdic(silent=True)
-                write_ppp(self._ppp_write_path(self.current_page), self.polygons, self.current_page.stem)
+                self._save_normalized_ppp()
                 self.settings.to_json(settings_path(self.project.root))
             self._pending_page_index = None
             self._invalidate_ui_worker("page-load")
@@ -13091,6 +12676,9 @@ class PictureCaptureApp(tk.Tk):
             self.project = project
             self._project_words = set(project.words)
             self.settings = project.settings
+            previews = self.__dict__.get("_page_thumbnails")
+            if previews is not None:
+                previews.load_preferences()  # Clear previous project's preview images.
             self._preprocess_results.clear()
             self._preprocess_photo = None
             self._preprocess_photo_cache_key = None
@@ -13264,6 +12852,8 @@ class PictureCaptureApp(tk.Tk):
             self.view_scale = view_scale
             self._set_page_list_selection(selected_index, ensure_visible=True)
             self.load_page(selected_index, preloaded=payload, skip_current_save=True)
+            # Only warm after the selected page and Treeview viewport are ready.
+            self._page_thumbnails.project_rows_ready()
             self._save_session_state()
             if launch_profile_setup:
                 # A new project starts from the documented release workspace even
@@ -13318,6 +12908,23 @@ class PictureCaptureApp(tk.Tk):
         ):
             if self._can_save_current_during_batch_navigation():
                 self._save_current_page_by_mode(sync_editors=not review_saved)
+        from .proofreading_transactions import recover_pending_for_page
+        try:
+            target_page = self.project.images[index]
+            trusted_manual_path = (
+                ocr_cache_root(self.project.root)
+                / f"{target_page.stem}_manual_selection.json"
+            )
+            if not recover_pending_for_page(target_page, manual_path=trusted_manual_path):
+                self.status_var.set(
+                    "R3 校对事务恢复需要人工处理：磁盘状态与恢复标记不匹配，本次未切页。"
+                )
+                return
+        except (OSError, ValueError, RuntimeError):
+            self.status_var.set(
+                "R3 校对事务恢复失败：未读取可能不一致的 PDIC/简体配对。"
+            )
+            return
         self.current_index = index; self.current_page = self.project.images[index]
         self._auxiliary_controller.load_page(self.current_page)
         use_preloaded = bool(
@@ -13342,6 +12949,9 @@ class PictureCaptureApp(tk.Tk):
             ocr_payload = preloaded.get("ocr_payload") if isinstance(preloaded.get("ocr_payload"), dict) else {}
             self.ocr_review_candidates = list(ocr_payload.get("review_candidates") or [])
             self._restore_entry_ocr_metadata(ocr_payload)
+            self._review_controller_for_call().load_ocr_review_candidates(
+                preloaded_candidates=self.ocr_review_candidates,
+            )
             self.polygons = list(preloaded.get("polygons") or [])
         else:
             with Image.open(self.current_page) as opened:
@@ -13537,6 +13147,7 @@ class PictureCaptureApp(tk.Tk):
     # One entry's canvas/editor widgets are owned by the dedicated UI module.
     # Importing as a class attribute preserves method binding and call sites.
     from .ui.entry_overlay_builder import draw_entry_overlay as _draw_entry_overlay
+    from .ui.entry_move_controller import move_entry_via_dialog as _move_entry_via_dialog
 
     def _remove_entry_overlay(self, entry: WordEntry) -> None:
         """Remove only the widgets/canvas items belonging to one headword row."""
@@ -13653,7 +13264,7 @@ class PictureCaptureApp(tk.Tk):
             integrate_illustrations=integrate_illustrations,
             profile_page_index=max(0, int(self.current_index)),
             page_sections=list(self.page_sections),
-            auxiliary_lines=list(self._auxiliary_edits.lines),
+            auxiliary_lines=list(self._auxiliary_edits.lines), page_stem=self.current_page.stem, previous_entry_ref=self._illustration_controller_for_call().previous_entry_ref(),
         )
 
     def _draw_crop_plan_preview(self) -> None:
@@ -13881,6 +13492,9 @@ class PictureCaptureApp(tk.Tk):
                 self.canvas.create_window(cx, cy, window=check, anchor="nw")
         show_shapes = bool(self.polygon_var.get() or self.polygon_draw_var.get())
         show_labels = bool(self.settings.show_illustration_labels)
+        numbered_labels = (
+            self._illustration_controller_for_call().preview_labels() if show_labels else []
+        )
         if show_shapes or show_labels:
             for region_index, region in enumerate(self.polygons):
                 coords = [value * self.view_scale for point in region.points for value in point]
@@ -13948,7 +13562,7 @@ class PictureCaptureApp(tk.Tk):
                             self.settings.illustration_label_font_italic,
                         ),
                     )
-                    label_entry.insert(0, self._polygon_display_name(region, region_index))
+                    label_entry.insert(0, label_text(numbered_labels[region_index]))
                     label_entry.bind("<FocusOut>", lambda _e, r=region, w=label_entry: self._update_polygon_label(r, w))
                     label_entry.bind("<Return>", lambda _e, r=region, w=label_entry: self._commit_polygon_label_return(r, w))
                     label_entry.pack(side="left")
@@ -14068,39 +13682,26 @@ class PictureCaptureApp(tk.Tk):
 
     @staticmethod
     def _polygon_display_name(region: PolygonRegion, index: int) -> str:
-        label = str(region.label or "").strip()
-        fields = label.split("|")
-        if len(fields) >= 3 and fields[1].strip():
-            return fields[1].strip()
-        return label or f"P_{index + 1:02d}"
+        return label_text(region.label) or f"P_{index + 1:02d}"
 
     def _set_polygon_display_name(self, region: PolygonRegion, name: str) -> None:
-        name = re.sub(r"[\t\r\n|]+", "_", str(name or "").strip())
-        if not name:
-            return
-        label = str(region.label or "")
-        fields = label.split("|")
-        if len(fields) >= 4:
-            fields[1] = name
-            region.label = "|".join(fields)
-        else:
-            region.label = name
+        """Compatibility setter: accept only association-code changes."""
+        region.label = user_edited_link(region.label, name)
 
     def _update_polygon_label(self, region: PolygonRegion, widget: tk.Entry) -> None:
         if self._batch_active and self._batch_allow_pdic_edits:
             return
         try:
-            name = widget.get().strip()
+            text = widget.get().strip()
         except tk.TclError:
             return
-        before = region.label
-        self._set_polygon_display_name(region, name)
-        if region.label != before and self.current_page is not None:
-            try:
-                write_ppp(self._ppp_write_path(self.current_page), self.polygons, self.current_page.stem)
-                self.status_var.set(f"PPP名称已更新：{name}")
-            except Exception as exc:
-                self.show_error("保存PPP名称失败", exc)
+        if self._illustration_controller_for_call().update_label(region, text):
+            self.status_var.set(f"PPP标签已保存：{label_text(region.label)}")
+        try:
+            widget.delete(0, tk.END)
+            widget.insert(0, label_text(region.label))
+        except tk.TclError:
+            pass
 
     def _commit_polygon_label_return(self, region: PolygonRegion, widget: tk.Entry) -> str:
         self._update_polygon_label(region, widget)
@@ -14111,10 +13712,20 @@ class PictureCaptureApp(tk.Tk):
         return "break"
 
     def _sync_polygon_label_texts(self) -> None:
-        for widget, region in list(getattr(self, "polygon_label_bindings", [])):
+        """Carry edited association codes across redraw without reassigning IDs."""
+        if self.__dict__.get("_suppress_polygon_label_sync", False):
+            return
+        bindings = list(getattr(self, "polygon_label_bindings", []))
+        if not bindings or self.current_page is None:
+            return
+        expected = self._illustration_controller_for_call().preview_labels()
+        for widget, region in bindings:
             try:
-                self._set_polygon_display_name(region, widget.get())
-            except tk.TclError:
+                index = next(i for i, item in enumerate(self.polygons) if item is region)
+                typed = widget.get().strip()
+                if typed != label_text(expected[index]):
+                    region.label = user_edited_link(expected[index], typed)
+            except (tk.TclError, ValueError, IndexError, StopIteration):
                 continue
 
     def _nearest_polygon_vertex(self, x: int, y: int, radius_screen: float = 11.0) -> tuple[int, int] | None:
@@ -14200,16 +13811,10 @@ class PictureCaptureApp(tk.Tk):
         if not messagebox.askyesno("删除PPP插图", f"删除插图：{name}？\n\n只删除当前这一个 PPP 区域。", parent=self):
             return
         self._sync_polygon_label_texts()
-        try:
-            self.polygons.pop(index)
+        if self._illustration_controller_for_call().delete_polygon(region):
             self._drag_polygon_vertex = None
             self._drag_polygon_edge = None
-            write_ppp(self._ppp_write_path(self.current_page), self.polygons, self.current_page.stem)
-            self._update_page_row(self.current_index)
-            self.redraw()
             self.status_var.set(f"已删除 PPP 插图：{name}")
-        except Exception as exc:
-            self.show_error("删除PPP插图失败", exc)
 
     @staticmethod
     @staticmethod
@@ -14488,6 +14093,9 @@ class PictureCaptureApp(tk.Tk):
         active = not self.polygon_draw_var.get()
         self.polygon_draw_var.set(active)
         if active:
+            if self.polygons:
+                self._sync_polygon_label_texts()
+                self._save_normalized_ppp()
             if self._section_editing:
                 self._set_section_editing(False)
             # Drawing must remain visible even if the ordinary display checkbox
@@ -14594,6 +14202,10 @@ class PictureCaptureApp(tk.Tk):
             return
         col = column_index_for_click(x, geometry, y)
         source_x, source_y = geometry.canonical_to_source(geometry.column_starts[col], canonical_y)
+        # Only an actual canvas click may initiate a manual-add evidence event.
+        queue_add = getattr(self, "_queue_proofreading_add_evidence", None)
+        if callable(queue_add):
+            queue_add(source_x, source_y)
         self.entries.append(WordEntry("", source_x, source_y))
         self._sort_entries_reading_order()
         self.redraw()
@@ -14665,8 +14277,8 @@ class PictureCaptureApp(tk.Tk):
         if self.current_page is not None:
             try:
                 self._sync_polygon_label_texts()
-                write_ppp(self._ppp_write_path(self.current_page), self.polygons, self.current_page.stem)
-                self.status_var.set("PPP轮廓已调整并保存")
+                if self._illustration_controller_for_call().persist_current(redraw=True):
+                    self.status_var.set("PPP轮廓已调整并保存")
             except Exception as exc:
                 self.show_error("保存PPP轮廓失败", exc)
         return "break"
@@ -14689,11 +14301,16 @@ class PictureCaptureApp(tk.Tk):
             return
         if self.polygon_draw_var.get():
             if not self.guard(): return
-            if len(self.new_polygon) >= 3:
-                label = simpledialog.askstring("插图标注", "多边形标签（可留空）：", parent=self) or ""
-                self.polygons.append(PolygonRegion(label, self.new_polygon.copy()))
-                self._update_page_row(self.current_index)
-            self.new_polygon.clear(); self.redraw(); return
+            points = self.new_polygon.copy()
+            self.new_polygon.clear()
+            if len(points) >= 3:
+                if self._illustration_controller_for_call().add_manual_polygon(points):
+                    self.status_var.set("已保存插图，整页序号已按阅读顺序更新")
+                else:
+                    self.redraw()
+            else:
+                self.redraw()
+            return
         if not self.project or not self.current_page or self.image is None:
             return
         # Navigation must not claim/lock a pending OCR-batch page. Only actual
@@ -14896,7 +14513,7 @@ class PictureCaptureApp(tk.Tk):
     ) -> tk.Menubutton | None:
         """Create a compact OCR-result selector displayed beside a main editor."""
         rows = _candidate_choice_rows(candidate)
-        if not rows or candidate is None:
+        if not _has_distinct_ocr_alternatives(candidate) or not rows:
             return None
         button = tk.Menubutton(
             self.canvas, text="OCR ▾",
@@ -15011,6 +14628,163 @@ class PictureCaptureApp(tk.Tk):
                 self._pending_manual_override_path = None
                 self._pending_manual_override_payload = None
 
+    def _queue_proofreading_add_evidence(self, x: int, y: int) -> None:
+        """Stage a user canvas click, NOT a durable event until PDIC commits."""
+        if not getattr(getattr(self, "settings", None), "proofreading_event_capture", False):
+            return
+        state = self.__dict__
+        if "_pending_evidence_add" in state:
+            # More than one insertion or additional save requests coalesced.
+            state["_pending_evidence_add"] = False
+            return
+        project = getattr(self, "project", None)
+        page = getattr(self, "current_page", None)
+        if project is None or page is None:
+            return
+        try:
+            old = read_pdic(pdic_path(page))
+        except (OSError, ValueError):
+            return
+        from .proofreading_capture import verified_ocr_preedit_fingerprints
+        cache_fn = getattr(self, "_paddle_cache_path", None)
+        cache = cache_fn() if callable(cache_fn) else None
+        source = verified_ocr_preedit_fingerprints(cache, pdic_path(page))
+        state["_pending_evidence_add"] = (page, old, (int(x), int(y)), source)
+
+    def _flush_proofreading_add_evidence(self) -> None:
+        """Record the manual click only after a successfully saved PDIC."""
+        snapshot = self.__dict__.pop("_pending_evidence_add", None)
+        if not isinstance(snapshot, tuple):
+            return
+        if not getattr(getattr(self, "settings", None), "proofreading_event_capture", False):
+            return
+        if len(snapshot) != 4:
+            return
+        page, old, xy, source = snapshot
+        project = getattr(self, "project", None)
+        if project is None or getattr(self, "current_page", None) != page:
+            return
+        try:
+            from .proofreading_capture import capture_saved_manual_addition
+            capture_saved_manual_addition(
+                project_root=project.root, page=page,
+                prior_pdic_entries=old, expected_xy=xy,
+                source_fingerprints=source,
+            )
+        except (OSError, ValueError, TypeError):
+            status = getattr(self, "status_var", None)
+            if status is not None:
+                status.set("词条已保存，但本地新增词条日志写入失败。")
+
+    def _queue_proofreading_candidate_evidence(self, cand: dict, selected: bool) -> None:
+        """Keep one pre-save checkbox snapshot; coalesced edits are ambiguous."""
+        state = self.__dict__
+        if not getattr(getattr(self, "settings", None), "proofreading_event_capture", False):
+            return
+        if "_pending_evidence_toggle" in state:
+            state["_pending_evidence_toggle"] = False
+            return
+        page = getattr(self, "current_page", None)
+        if page is None or getattr(self, "project", None) is None:
+            return
+        candidate_id = str(cand.get("candidate_id", "") or "")
+        if not candidate_id or sum(
+            str(row.get("candidate_id", "")) == candidate_id
+            for row in getattr(self, "ocr_review_candidates", ())
+            if isinstance(row, dict)
+        ) != 1:
+            return
+        try:
+            before = read_pdic(pdic_path(page))
+            override = self._manual_selection_path()
+            expected = (
+                str(cand.get("word", "")),
+                int(cand.get("source_x", 0)), int(cand.get("source_y", 0)),
+            )
+        except (OSError, ValueError, TypeError):
+            return
+        if override is None:
+            return
+        position_switch = None
+        group_id = str(cand.get("position_group_id") or "")
+        if selected and group_id:
+            siblings = [
+                row for row in getattr(self, "ocr_review_candidates", ())
+                if row is not cand and isinstance(row, dict)
+                and row.get("position_group_id") == group_id
+                and str(row.get("candidate_id") or "") != candidate_id
+            ]
+            # Only an actual selected, uniquely linked sibling counts as the
+            # pre-click physical-headword location; never infer from nearest Y.
+            matched = [
+                (str(entry.candidate_id), (str(entry.word), int(entry.x), int(entry.y)))
+                for sibling in siblings
+                for entry in getattr(self, "entries", ())
+                if str(entry.candidate_id or "") == str(sibling.get("candidate_id") or "")
+                and str(entry.candidate_id or "")
+            ]
+            if len(matched) == 1:
+                removed_id, removed_row = matched[0]
+                if sum(
+                    str(row.get("candidate_id") or "") == removed_id
+                    for row in getattr(self, "ocr_review_candidates", ())
+                    if isinstance(row, dict)
+                ) == 1:
+                    position_switch = (removed_id, removed_row, group_id)
+        from .proofreading_capture import verified_ocr_preedit_fingerprints
+        cache_fn = getattr(self, "_paddle_cache_path", None)
+        cache = cache_fn() if callable(cache_fn) else None
+        source = verified_ocr_preedit_fingerprints(cache, pdic_path(page))
+        state["_pending_evidence_toggle"] = (
+            page, before, expected, candidate_id, bool(selected), override,
+            position_switch, source,
+        )
+
+    def _flush_proofreading_candidate_evidence(self) -> None:
+        """Only after PDIC and delayed manual-selection sidecar are both saved."""
+        snapshot = self.__dict__.pop("_pending_evidence_toggle", None)
+        if not isinstance(snapshot, tuple):
+            return
+        if len(snapshot) != 8:
+            return
+        page, before, expected, candidate_id, selected, override, position_switch, source = snapshot
+        if not getattr(getattr(self, "settings", None), "proofreading_event_capture", False):
+            return
+        project = getattr(self, "project", None)
+        # A deferred callback must never attribute a previous page's click
+        # after navigation has already changed the active page.
+        if project is None or getattr(self, "current_page", None) != page:
+            return
+        try:
+            from .proofreading_capture import (
+                capture_saved_candidate_selection,
+                capture_saved_position_switch,
+            )
+            recorded = capture_saved_candidate_selection(
+                project_root=project.root, page=page,
+                prior_pdic_entries=before, expected_entry=expected,
+                candidate_id=candidate_id, candidate_id_unique=True,
+                selected=selected, manual_selection_path=override,
+                source_fingerprints=source,
+            )
+            if not recorded and selected and position_switch is not None:
+                old_candidate_id, old_entry, group_id = position_switch
+                capture_saved_position_switch(
+                    project_root=project.root, page=page,
+                    prior_pdic_entries=before,
+                    removed_entry=old_entry, added_entry=expected,
+                    removed_candidate_id=old_candidate_id,
+                    added_candidate_id=candidate_id,
+                    position_group_id=group_id,
+                    manual_selection_path=override,
+                    source_fingerprints=source,
+                )
+        except (OSError, ValueError, TypeError):
+            # Journal failure must not roll back user PDIC or overrides.
+            status = getattr(self, "status_var", None)
+            if status is not None:
+                status.set("候选选择已保存，但本地校对日志写入失败。")
+
     def _schedule_deferred_page_save(self, *, sync_editors: bool = True) -> None:
         """Coalesce rapid checkbox edits while preserving an exact page snapshot."""
         project = self.__dict__.get("project")
@@ -15059,6 +14833,8 @@ class PictureCaptureApp(tk.Tk):
                 self._refresh_word_fill_check_from_line_count(page_index, len(entries), persist=True)
                 self._update_page_row(page_index)
         self._flush_pending_manual_override()
+        self._flush_proofreading_candidate_evidence()
+        self._flush_proofreading_add_evidence()
 
     def _entry_for_candidate(self, cand: dict) -> WordEntry | None:
         return self._review_controller_for_call().entry_for_candidate(cand)
@@ -15067,6 +14843,7 @@ class PictureCaptureApp(tk.Tk):
     def set_candidate_selected(self, cand: dict, selected: bool) -> bool:
         if not self._claim_page_for_manual_edit():
             return False
+        self._queue_proofreading_candidate_evidence(cand, selected)
         # Commit every visible editor by object identity before changing the
         # entries list. This prevents a middle-row removal from reassigning the
         # following editor texts to earlier entries.
@@ -15603,7 +15380,8 @@ class PictureCaptureApp(tk.Tk):
             "精修画线",
             f"将重新调用现有 Y 精修逻辑处理所选 {len(indices)} 页：\n"
             f"{first}" + (f" → {last}" if len(indices) > 1 else "") +
-            "\n\n只允许移动已有画线，不会新增或删除任何画线；"
+            "\n\n请先去设置中心的精修Y调整参数。\n"
+            "只允许移动已有画线，不会新增或删除任何画线；"
             "每条线的 Y 移动量不会超过当前精修搜索半径。是否继续？",
             parent=self,
         ):
@@ -15641,6 +15419,8 @@ class PictureCaptureApp(tk.Tk):
                 )
             if [entry.word for entry in refined] != original_words:
                 raise RuntimeError(f"{page.name} 精修意外修改了词条文本")
+            from .marker_refinement_guard import validate_refined_markers
+            validate_refined_markers(page, entries, refined, image.size)
             write_pdic(pdic_path(page), refined, image.width, pages_info[index])
             return {
                 "index": index,
@@ -15703,7 +15483,7 @@ class PictureCaptureApp(tk.Tk):
         if len(existing) > 1 and not messagebox.askyesno(
             "普通画线后OCR文字",
             f"将对 {len(existing)} 个已有画线的页面逐条调用共享 OCR 通道。\n\n"
-            "只填充空白词条；已有文字和人工校对内容保持不变；"
+            "重新 OCR 并覆盖已有的自动 OCR 文本；明确人工选定的词条保留；"
             "不会新增、删除或移动任何画线。继续？",
             parent=self,
         ):
@@ -15734,7 +15514,7 @@ class PictureCaptureApp(tk.Tk):
             protected_words = {
                 (int(entry.x), int(entry.y)): str(entry.word or "")
                 for entry in entries
-                if str(entry.word or "").strip() or bool(entry.manually_selected)
+                if bool(entry.manually_selected)
             }
             with Image.open(page) as opened:
                 image = normalize_page_rgb(opened)
@@ -15747,7 +15527,7 @@ class PictureCaptureApp(tk.Tk):
                 profile_page_index=index,
                 page_sections=sections,
                 profile_path=profile_path,
-                only_blank=True,
+                only_blank=False,
             )
             if len(updated) != original_count:
                 raise RuntimeError(
@@ -15759,7 +15539,7 @@ class PictureCaptureApp(tk.Tk):
             for entry in updated:
                 key = (int(entry.x), int(entry.y))
                 if key in protected_words and str(entry.word or "") != protected_words[key]:
-                    raise RuntimeError(f"{page.name} OCR文字意外覆盖了已有/人工文本")
+                    raise RuntimeError(f"{page.name} OCR文字意外覆盖了人工选定文本")
             write_pdic(pdic_path(page), updated, image.width, pages_info[index])
             export_ocred(
                 qt_root(project.root) / f"{page.stem}.OCRed",
@@ -15787,9 +15567,9 @@ class PictureCaptureApp(tk.Tk):
                 else f"普通画线后OCR文字完成：{completed}/{total} 页"
             )
             self.status_var.set(
-                f"{prefix}；填入 {filled} 条"
+                f"{prefix}；OCR 覆盖/识别 {filled} 条"
                 f"（普通框 {regular}，大字框 {large}）"
-                f"；未识别 {failed} 条；保护已有/人工文本 {skipped} 条"
+                f"；未识别 {failed} 条；保留人工选定 {skipped} 条"
             )
 
         self._start_batch_task(
@@ -15816,6 +15596,10 @@ class PictureCaptureApp(tk.Tk):
 
 
     def _detect_pages(self, indices: list[int], *, method: str, force_refresh: bool) -> None:
+        if method == "left_edge":
+            # One physical page must never be submitted to multiple writer
+            # processes in the same batch, even through an unusual API caller.
+            indices = list(dict.fromkeys(indices))
         if not self.project or not indices:
             self.status_var.set("没有需要处理的页面"); return
         if not self._guard_transformed_geometry("批量画线"):
@@ -15832,26 +15616,123 @@ class PictureCaptureApp(tk.Tk):
             parent=self,
         ):
             return
+        from .layout_mask_source_guard import missing_saved_illustrations, detection_mask_source_path
+        missing_ppp = missing_saved_illustrations(
+            (self.project.images[i] for i in indices), self.settings,
+        )
+        if missing_ppp:
+            names = "、".join(page.name for page in missing_ppp[:4])
+            suffix = f" 等 {len(missing_ppp)} 页" if len(missing_ppp) > 4 else ""
+            message = (f"这些页面缺少已保存的 PPP 插图数据：{names}{suffix}。\n"
+                       "请先运行插图识别，或在设置中心→插图关闭‘使用已有的插图数据’。\n"
+                       "本次画线未开始，其他页面的 PDIC 不会被部分覆盖。")
+            self.status_var.set(message)
+            messagebox.showerror("Layout 插图复用检查失败", message, parent=self)
+            return
+        import time
+        batch_started_at = time.time()
         self.save_pdic(silent=True)
+        # Auto illustration detection persists PPP in workers. Flush any
+        # foreground manual edits first so the worker's AUTO merge preserves
+        # them. PPP-reuse mode is read-only and must never fabricate a missing
+        # PPP file.
+        if (
+            method == "left_edge"
+            and bool(getattr(self.settings, "layout_mask_illustrations", False))
+            and not bool(getattr(self.settings, "layout_mask_illustrations_use_existing", False))
+            and self.current_page is not None
+        ):
+            from .formats import write_ppp
+            self._sync_polygon_label_texts()
+            self._save_normalized_ppp()
         self.settings.detection_method = method
         settings = replace(self.settings)
+        # Set the process environment *before* spawning workers. Snapshot the
+        # values at the start of this batch to keep child processes consistent.
+        os.environ["PICTURE_CAPTURE_DRAW_PROFILE"] = (
+            "1" if bool(getattr(settings, "draw_performance_profile", False)) else "0"
+        )
+        os.environ["PICTURE_CAPTURE_REUSE_PREPARED_ANALYSIS"] = (
+            "1" if bool(getattr(settings, "reuse_prepared_analysis", False)) else "0"
+        )
         project = self.project
         pages_info = {i: self.pages_tuple(i) for i in indices}
         filter_path = headword_filter_rules_path(project.root, HEADWORD_FILTER_RULES_FILENAME)
+        from .ordinary_parallel import ordinary_draw_workers
+        ordinary_workers = (
+            ordinary_draw_workers(len(indices)) if method == "left_edge" else 1
+        )
+        from .ordinary_gpu_pipeline import staged_pipeline_enabled
+        from .ordinary_cpu_pool import cpu_pool_enabled, cpu_pool_config
+        cpu_pool = bool(
+            method == "left_edge"
+            and cpu_pool_enabled(settings, len(indices))
+        )
+        cpu_pool_workers, cpu_inference_threads = (
+            cpu_pool_config(len(indices)) if cpu_pool else (1, 1)
+        )
+        # The two experiments are mutually exclusive. Explicit CPU-only
+        # mode wins if both flags accidentally exist in the environment.
+        gpu_staged = bool(
+            method == "left_edge" and not cpu_pool
+            and staged_pipeline_enabled(settings, len(indices))
+        )
+        if cpu_pool:
+            ordinary_workers = cpu_pool_workers
+        elif gpu_staged:
+            # Memory-conservative trial: ONE reusable GPU detector and at
+            # most two CPU page allocations; never six CUDA model copies.
+            ordinary_workers = 2
         normal_executor = (
             ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn"))
-            if method == "left_edge" else None
+            if method == "left_edge" and ordinary_workers <= 1 else None
         )
 
         def worker(index: int, _position: int, _total: int):
             page = project.images[index]
+            from .draw_performance_profile import enabled as profile_enabled, record_page
+            tracing = profile_enabled() and method in {"paddleocr", "combined"}
+            stages = {}
+            trace_tick = time.perf_counter()
+            resume_dependencies = ()
+            if (
+                method in {"paddleocr", "combined"}
+                and settings.ocr_resume_completed_pages
+                and not force_refresh
+            ):
+                from .project_storage import page_sections_read_path_for_image
+                from .ocr_page_resume import validated_resume
+                resume_dependencies = (
+                    filter_path,
+                    project_profile_path(project.root),
+                    page_sections_read_path_for_image(page),
+                    *( (replace_rules_path(project.root),) if method == "combined" else () ),
+                )
+                saved = pdic_path(page)
+                previous_count = validated_resume(
+                    ocr_cache_root(project.root), page, saved,
+                    page_index=index, method=method, settings=settings,
+                    dependencies=resume_dependencies,
+                )
+                if previous_count is not None:
+                    return {"index": int(index), "count": previous_count, "resumed": True}
             if normal_executor is not None:
-                count = normal_executor.submit(
-                    detect_entries_job, str(page), settings, pages_info[index], index
-                ).result()
+                if cpu_pool:
+                    from .ordinary_cpu_pool import cpu_ordinary_page_job
+                    count = normal_executor.submit(
+                        cpu_ordinary_page_job, str(page), settings,
+                        pages_info[index], index, cpu_inference_threads,
+                    ).result()
+                else:
+                    count = normal_executor.submit(
+                        detect_entries_job, str(page), settings, pages_info[index], index
+                    ).result()
                 return {"index": int(index), "count": int(count)}
             with Image.open(page) as opened:
                 image = normalize_page_rgb(opened)
+            if tracing:
+                stages["ocr_image_load"] = time.perf_counter() - trace_tick
+                trace_tick = time.perf_counter()
             cache_path = ocr_cache_root(project.root) / f"{page.stem}.json" if method in {"paddleocr", "combined"} else None
             sections = read_page_sections(page)
             entries, _geometry = detect_entries(
@@ -15860,7 +15741,13 @@ class PictureCaptureApp(tk.Tk):
                 paddle_filter_rules_path=filter_path,
                 profile_page_index=index,
                 page_sections=sections,
+                source_image_path=detection_mask_source_path(
+                    page, settings, ordinary=method == "left_edge",
+                ),
             )
+            if tracing:
+                stages["ocr_detect_entries"] = time.perf_counter() - trace_tick
+                trace_tick = time.perf_counter()
             text_stats = None
             if method == "combined":
                 original_coords = [
@@ -15882,8 +15769,53 @@ class PictureCaptureApp(tk.Tk):
                     raise RuntimeError(
                         f"{page.name} 融合画线自动补字意外修改了画线坐标"
                     )
-            write_pdic(pdic_path(page), entries, image.width, pages_info[index])
+            if tracing:
+                stages["ocr_marker_text_fill"] = time.perf_counter() - trace_tick
+                trace_tick = time.perf_counter()
+            saved_pdic = pdic_path(page)
+            if method in {"paddleocr", "combined"}:
+                # Mandatory lossless snapshot BEFORE replacing an existing
+                # PDIC. If preservation fails, abort this page rather than
+                # silently overwrite the user's only manual corrections.
+                from .ocr_pdic_preservation import preserve_prior_pdic
+                preserve_prior_pdic(project.root, page, saved_pdic)
+            write_pdic(saved_pdic, entries, image.width, pages_info[index])
+            if tracing:
+                stages["ocr_preserve_and_pdic"] = time.perf_counter() - trace_tick
+                trace_tick = time.perf_counter()
             result = {"index": int(index), "count": len(entries)}
+            if method in {"paddleocr", "combined"} and cache_path is not None:
+                # The OCR cache is pre-Layout. Read the *actual saved PDIC*
+                # and record final moves/removals/rescues separately. This
+                # audit never modifies PDIC and failure must not lose a page.
+                try:
+                    from .ocr_final_decisions import record_final_decisions
+                    result["final_audit"] = record_final_decisions(
+                        cache_path, saved_pdic, entries,
+                        tolerance=max(5, round(settings.character_height * 0.45)),
+                    )
+                except (OSError, ValueError, TypeError) as exc:
+                    result["final_audit_error"] = f"{type(exc).__name__}: {exc}"
+            if method in {"paddleocr", "combined"} and settings.ocr_resume_completed_pages:
+                if not resume_dependencies:
+                    # A forced OCR rerun bypasses prior checkpoints but still
+                    # writes a *new* completed checkpoint for later resumption.
+                    from .project_storage import page_sections_read_path_for_image
+                    resume_dependencies = (
+                        filter_path,
+                        project_profile_path(project.root),
+                        page_sections_read_path_for_image(page),
+                        *((replace_rules_path(project.root),) if method == "combined" else ()),
+                    )
+                from .ocr_page_resume import write_page_resume
+                try:
+                    write_page_resume(
+                        ocr_cache_root(project.root), page, pdic_path(page),
+                        page_index=index, method=method, settings=settings,
+                        marker_count=len(entries), dependencies=resume_dependencies,
+                    )
+                except (OSError, ValueError, TypeError) as exc:
+                    result["resume_checkpoint_error"] = f"{type(exc).__name__}: {exc}"
             if text_stats:
                 result.update({
                     "text_filled": int(text_stats.get("filled", 0)),
@@ -15891,6 +15823,9 @@ class PictureCaptureApp(tk.Tk):
                     "text_large": int(text_stats.get("large", 0)),
                     "text_failed": int(text_stats.get("failed", 0)),
                 })
+            if tracing:
+                stages["ocr_audit_resume"] = time.perf_counter() - trace_tick
+                record_page(page, index, stages, mode=method)
             return result
 
         def done(completed, total, stopped, results, error):
@@ -15903,6 +15838,33 @@ class PictureCaptureApp(tk.Tk):
             if method in {"paddleocr", "combined"}:
                 self._refresh_page_quality_colors()
                 quality_text = "；页面列表已按 OCR 一致性/质量状态更新"
+                resumed = sum(
+                    1 for row in results if isinstance(row, dict) and row.get("resumed")
+                )
+                if resumed:
+                    quality_text += f"；经完整校验断点跳过 {resumed} 页"
+                checkpoint_failures = sum(
+                    1 for row in results
+                    if isinstance(row, dict) and row.get("resume_checkpoint_error")
+                )
+                if checkpoint_failures:
+                    quality_text += f"；{checkpoint_failures} 页无法记录恢复点"
+                final_stats = [
+                    row.get("final_audit")
+                    for row in results
+                    if isinstance(row, dict) and isinstance(row.get("final_audit"), dict)
+                ]
+                if final_stats:
+                    quality_text += (
+                        f"；最终PDIC对齐 {sum(int(v.get('linked', 0)) for v in final_stats)} 条"
+                        f"，Layout等独立候选 {sum(int(v.get('unmatched_final', 0)) for v in final_stats)} 条"
+                    )
+                audit_errors = sum(
+                    1 for row in results
+                    if isinstance(row, dict) and row.get("final_audit_error")
+                )
+                if audit_errors:
+                    quality_text += f"；{audit_errors} 页最终决策记录未能保存（PDIC已保存）"
                 if method == "combined":
                     filled = sum(
                         int((row or {}).get("text_filled", 0))
@@ -15954,6 +15916,51 @@ class PictureCaptureApp(tk.Tk):
                         f"；{len(suspect_rows)} 页画线数异常，建议优先复核"
                         + (f"（{', '.join(names)}{more}）" if names else "")
                     )
+            from .inference_monitor import recent_model_events
+            elapsed_seconds = max(0.001, time.time() - batch_started_at)
+            observed_events = recent_model_events(batch_started_at)
+            observed_devices = sorted({str(row["device"]) for row in observed_events})
+            observed_pids = {int(row["pid"]) for row in observed_events}
+            inferred = "/".join(observed_devices) if observed_devices else "未记录（可能命中缓存）"
+            monitor_text = (
+                f"；耗时 {elapsed_seconds:.1f}s"
+                f"；速度 {completed / elapsed_seconds:.2f} 页/s"
+                f"；模型设备 {inferred}"
+                f"；模型实例进程 {len(observed_pids)}"
+            )
+            if cpu_pool:
+                monitor_text += f"；CPU 工作进程配置 {cpu_pool_workers}"
+            elif gpu_staged:
+                monitor_text += "；GPU 推理生产者 1 / CPU 消费者最多 2"
+            elif method in {"paddleocr", "combined"}:
+                monitor_text += "；OCR 页面串行调度"
+            if observed_events:
+                observed_dnn = sorted({
+                    str(row["mkldnn"]) for row in observed_events
+                    if row.get("device") == "cpu"
+                })
+                if observed_dnn:
+                    monitor_text += f"；oneDNN 配置 {'/'.join(observed_dnn)}"
+            quality_text += monitor_text
+            from .draw_performance_profile import (
+                enabled as profiling_enabled, recent_profiles, export_batch_report,
+            )
+            if profiling_enabled():
+                page_names = {str(project.images[i]) for i in indices}
+                stage_rows = recent_profiles(batch_started_at, pages=page_names)
+                try:
+                    report_path = export_batch_report(
+                        stage_rows, label=label, elapsed_seconds=elapsed_seconds,
+                        completed=completed, settings=settings,
+                    )
+                except Exception as exc:
+                    quality_text += f"；性能报告导出失败：{exc}"
+                else:
+                    quality_text += (
+                        f"；性能报告已保存：{report_path}"
+                        if stage_rows else
+                        f"；性能报告已保存（没有匹配到逐页计时数据）：{report_path}"
+                    )
             suffix = "（强制重新识别）" if method in {"paddleocr", "combined"} and force_refresh else ""
             skipped = int(getattr(self, "_batch_skipped_count", 0))
             skip_text = f"，人工锁定跳过 {skipped} 页" if skipped else ""
@@ -15967,11 +15974,69 @@ class PictureCaptureApp(tk.Tk):
                     f"{label}{suffix}完成：{completed}/{total}{skip_text}{quality_text}"
                 )
 
-        started = self._start_batch_task(
-            label, indices, worker, done,
-            item_label=lambda index: project.images[index].name,
-            foreground_page_edit=True, page_indexer=lambda index: int(index),
-        )
+        if gpu_staged:
+            from .ordinary_gpu_pipeline import (
+                prepare_gpu_layout_job, detect_entries_staged_job,
+            )
+            started = self._start_parallel_batch_task(
+                label, indices, detect_entries_staged_job,
+                lambda index, _position, _total: (
+                    str(project.images[index]), settings, pages_info[index], index,
+                ),
+                result_consumer=lambda index, count: {
+                    "index": int(index), "count": int(count),
+                },
+                on_done=done,
+                item_label=lambda index: project.images[index].name,
+                max_workers=ordinary_workers,
+                foreground_page_edit=True,
+                page_indexer=lambda index: int(index),
+                gpu_preflight_func=prepare_gpu_layout_job,
+                gpu_job_builder=lambda index, _position, _total: (
+                    str(project.images[index]), settings, index,
+                ),
+            )
+        elif cpu_pool and cpu_pool_workers > 1:
+            from .ordinary_cpu_pool import cpu_ordinary_page_job
+            started = self._start_parallel_batch_task(
+                label, indices, cpu_ordinary_page_job,
+                lambda index, _position, _total: (
+                    str(project.images[index]), settings,
+                    pages_info[index], index, cpu_inference_threads,
+                ),
+                result_consumer=lambda index, count: {
+                    "index": int(index), "count": int(count),
+                },
+                on_done=done,
+                item_label=lambda index: project.images[index].name,
+                max_workers=cpu_pool_workers,
+                foreground_page_edit=True,
+                page_indexer=lambda index: int(index),
+            )
+        elif method == "left_edge" and ordinary_workers > 1:
+            # Dormant legacy parallel path: the ordinary_draw_workers safety
+            # policy always returns 1 unless a separately validated design
+            # deliberately changes it. No duplicate GPU inference permitted.
+            started = self._start_parallel_batch_task(
+                label, indices, detect_entries_job,
+                lambda index, _position, _total: (
+                    str(project.images[index]), settings, pages_info[index], index,
+                ),
+                result_consumer=lambda index, count: {
+                    "index": int(index), "count": int(count),
+                },
+                on_done=done,
+                item_label=lambda index: project.images[index].name,
+                max_workers=ordinary_workers,
+                foreground_page_edit=True,
+                page_indexer=lambda index: int(index),
+            )
+        else:
+            started = self._start_batch_task(
+                label, indices, worker, done,
+                item_label=lambda index: project.images[index].name,
+                foreground_page_edit=True, page_indexer=lambda index: int(index),
+            )
         if not started and normal_executor is not None:
             normal_executor.shutdown(wait=False, cancel_futures=True)
 
@@ -16029,6 +16094,8 @@ class PictureCaptureApp(tk.Tk):
         changed = write_pdic(pdic_path(self.current_page), self.entries, self.image.width, self.pages_tuple())
         self._last_pdic_write_changed = changed
         self._flush_pending_manual_override()
+        self._flush_proofreading_candidate_evidence()
+        self._flush_proofreading_add_evidence()
         if changed:
             self._refresh_word_fill_check_from_line_count(self.current_index, len(self.entries), persist=True)
             self._update_page_row(self.current_index)
@@ -16049,7 +16116,7 @@ class PictureCaptureApp(tk.Tk):
     def save_all(self) -> None:
         if not self.guard(): return
         self.save_pdic()
-        write_ppp(self._ppp_write_path(self.current_page), self.polygons, self.current_page.stem)
+        self._save_normalized_ppp()
 
     def save_settings(self) -> None:
         if self.project:
@@ -16086,7 +16153,7 @@ class PictureCaptureApp(tk.Tk):
                         self.review_window = None
                 if not review_saved:
                     self.save_pdic(silent=True)
-                polygon_changed = write_ppp(self._ppp_write_path(self.current_page), self.polygons, self.current_page.stem)
+                polygon_changed = self._save_normalized_ppp()
                 if self._last_pdic_write_changed or polygon_changed:
                     self.status_var.set("已自动保存")
             self.toggle_autosave()
@@ -16238,33 +16305,13 @@ class PictureCaptureApp(tk.Tk):
         self._crop_controller_for_call().split_whole_current()
 
     def _crop_settings_defaults(self) -> dict:
-        default_bottom = self.settings.bottom_y if self.settings.crop_to_bottom_y else 0
-        return {
-            "version": CROP_SETTINGS_VERSION,
-            "coordinate_space": SOURCE_COORDINATE_SPACE,
-            "general_top_y": int(self.settings.start_y),
-            "general_bottom_y": int(default_bottom),
-            "entry_left_padding_x": 0,
-            "entry_right_padding_x": 0,
-            "integrate_illustrations": True,
-            "polygon_margin": 0,
-            "parallel_workers": int(self.settings.crop_parallel_workers),
-            "special_pages": {},
-        }
+        return _normalize_crop_settings_payload(None, self.settings)
 
     def _load_crop_settings(self) -> dict:
         if not self.project:
             return self._crop_settings_defaults()
-        path = qt_root(self.project.root) / CropSettingsDialog.CONFIG_NAME
-        raw: dict = {}
-        if path.exists():
-            try:
-                candidate = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(candidate, dict):
-                    raw = candidate
-            except (OSError, ValueError, TypeError):
-                raw = {}
-        return _normalize_crop_settings_payload(raw, self.settings)
+        from .crop.settings import load_crop_settings
+        return load_crop_settings(self.project.root, self.settings)
 
 
     def open_crop_settings(self) -> None:

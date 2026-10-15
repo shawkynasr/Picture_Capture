@@ -76,6 +76,54 @@ def binary_preview_image(source: Image.Image) -> Image.Image:
 
 
 
+
+def effective_overlay_column_width(geometry, column_index: int, configured_width: float) -> int:
+    """Use physical column width, not the final interval reaching the page edge."""
+    from statistics import median
+    widths = list(geometry.column_widths)
+    if not 0 <= column_index < len(widths):
+        raise IndexError(column_index)
+    actual = max(1, round(float(widths[column_index])))
+    if column_index < len(widths) - 1:
+        return actual
+    peers = [float(w) for w in widths[:-1] if float(w) > 0]
+    reference = median(peers) if peers else float(configured_width)
+    return min(actual, max(1, round(reference)))
+
+def canonical_headword_marker_span(
+    column_x: float, column_width: float, right_ratio: float,
+) -> tuple[int, int]:
+    """Use the same per-column rightward percentage as the saved crop box.
+
+    Unlike the former overlay-only 95% shortcut, 100% reaches the actual end
+    of the resolved column (which excludes its gutter). No change to separator
+    detection/Y refinement or the source-space Entry coordinates is involved.
+    """
+    left = int(round(float(column_x)))
+    fraction = max(0.01, min(1.0, float(right_ratio) / 100.0))
+    right = left + max(1, int(round(max(1.0, float(column_width)) * fraction)))
+    return left, max(left + 1, right)
+
+
+def horizontal_entry_editor_slot(
+    editor_x: float, column_end_x: float, delete_width: int, *,
+    rtl: bool = False, gap: int = 2,
+) -> tuple[int, float, str]:
+    """Fit the horizontal editor to column end minus visible [X] width.
+
+    Reserve the actual requested delete-control width, not a fixed number of
+    characters. The editor regains that width when the marker and its [X]
+    are hidden. RTL keeps the mirrored direction; the line, button position,
+    OCR selector and stored Entry coordinates are handled independently.
+    """
+    remaining = (
+        float(editor_x) - float(column_end_x) if rtl
+        else float(column_end_x) - float(editor_x)
+    )
+    pixels = max(1, int(round(remaining)) - max(0, int(delete_width)))
+    return pixels, float(column_end_x), "ne" if rtl else "nw"
+
+
 def vertical_marker_contact_gap(marker_line_width: int) -> int:
     """Offset from marker centreline so the editor border touches its painted edge."""
     return max(1, (max(1, int(marker_line_width)) + 1) // 2)

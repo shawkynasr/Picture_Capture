@@ -88,8 +88,17 @@ def natural_text_key(value: object) -> tuple:
     return tuple((0, int(part)) if part.isdigit() else (1, part) for part in parts if part)
 
 
+class _WeakrefableEntry:
+    """Support lifetime-safe sidecar metadata even on Python 3.10.
+
+    Dataclass weakref_slot was only added in Python 3.11; using a slotted base
+    adds weak references without giving each Entry an instance __dict__.
+    """
+    __slots__ = ("__weakref__",)
+
+
 @dataclass(slots=True)
-class Entry:
+class Entry(_WeakrefableEntry):
     """A dictionary headword marker in original-image pixel coordinates."""
 
     word: str
@@ -227,6 +236,11 @@ class AppSettings(metaclass=_AppSettingsMeta):
     right_ratio_percent_version: int = 1
     # VB.NET NumericUpDown10: separator analysis width = column_width / value * 0.98.
     ordinary_right_divisor: float = 1.0
+    # Horizontal ink-projection sampling extent used to reconstruct physical
+    # rows before semantic entry/body classification. Defaults to the previous
+    # hard-coded 42% of each column. A minimum glyph/absolute width is retained
+    # by _leading_width, and 100% always covers the full configured column.
+    physical_row_projection_width_percent: float = 42.0
     horizontal_tolerance: int = 13
     marker_height: int = 5
     guide_width: int = 2
@@ -259,6 +273,9 @@ class AppSettings(metaclass=_AppSettingsMeta):
     page_list_show_lined: bool = True
     page_list_show_fill_status: bool = False
     page_list_show_illustrations: bool = True
+    # Read-only page-index preview preferences; legacy projects default OFF.
+    page_list_show_thumbnails: bool = False
+    page_list_thumbnail_size: int = 80
     page_bookmarks: list[str] = field(default_factory=list)
     darkness_threshold: int = 300
     dark_area_percent: float = 90.0
@@ -268,7 +285,22 @@ class AppSettings(metaclass=_AppSettingsMeta):
     crop_parallel_workers: int = 0
     # Optional Layout-only preprocessing. Source scans, PPP annotations, OCR
     # input and crop outputs remain untouched; default preserves legacy behavior.
+    # Full-resolution shared analysis and detector-only experimental policies.
+    draw_performance_profile: bool = False
+    reuse_prepared_analysis: bool = False
+    analysis_denoise_enabled: bool = True
+    analysis_denoise_strength: str = "auto"
+    layout_denoise_enabled: bool = True
+    layout_scale_enabled: bool = False
+    layout_scale_columns: bool = True
+    layout_scale_column_width: bool = True
+    layout_scale_gutter: bool = True
+    layout_scale_start_y: bool = False
+    layout_scale_manual_x: bool = False
+    layout_scale_character_height: bool = False
+    layout_scale_row_padding: bool = False
     layout_mask_illustrations: bool = False
+    layout_mask_illustrations_use_existing: bool = False
     # Automatic PPP illustration detection intentionally adds a little context
     # around dark connected components. The right side gets a larger default
     # because classic dictionary illustrations often extend into the gutter.
@@ -554,6 +586,9 @@ class AppSettings(metaclass=_AppSettingsMeta):
     paddle_boldness_ratio: float = 1.12
     paddle_gap_ratio: float = 0.7
     paddle_min_candidate_score: float = 1.0
+    # Experimental Latin continuation rescue; OFF unless explicitly enabled.
+    # Safe to disable without changing OCR text recognition or other rescues.
+    paddle_peer_style_rescue: bool = False
     paddle_require_visual_cue: bool = True
     # For ordinary dictionary pages, a nearby POS label (or an explicit entry
     # symbol) is the safest way to reject indented definition lines.
@@ -578,6 +613,13 @@ class AppSettings(metaclass=_AppSettingsMeta):
     # and chooses the centre of the local low-ink valley, so descenders from
     # the preceding line (g/j/p/q/y) are not cut by the marker.
     paddle_refine_separator_y: bool = True
+    # Experimental ink-safe Y verification after the standard refiner; OFF by default.
+    separator_y_ink_safe_gap: bool = False
+    # Experimental white-gap guard: identical historical defaults when enabled.
+    separator_y_ink_safe_max_fraction: float = 0.25
+    separator_y_ink_safe_ink_threshold: int = 185
+    separator_y_ink_safe_existing_ink_ratio: float = 0.045
+    separator_y_ink_safe_gap_ink_ratio: float = 0.02
     paddle_separator_search_ratio: float = 0.30
     paddle_separator_band_radius: int = 2
     # Downward-biased Y-refinement safety clearance in original-image pixels.
@@ -587,8 +629,9 @@ class AppSettings(metaclass=_AppSettingsMeta):
     # analysis, expressed as a percentage of the current straightened column.
     # Keeping this local prevents long definition text at the right side of a
     # column from pulling the separator toward the preceding line.
-    paddle_separator_roi_width_ratio: float = 60.0
+    paddle_separator_roi_width_ratio: float = 100.0
     paddle_separator_column_margin: int = 8
+    separator_y_max_shift_ratio: float = 0.45
     # Optional second OCR pass for diagnostics / conservative rescue.  It uses
     # the same straightened candidate band and the existing Tesseract language/path.
     paddle_use_paddleocr: bool = True
@@ -617,6 +660,14 @@ class AppSettings(metaclass=_AppSettingsMeta):
     # therefore be manually promoted into the final PDIC result without changing
     # parser rules. Selections are persisted in a per-page sidecar.
     paddle_show_candidate_checkboxes: bool = True
+    # Opt-in across-process OCR/combined batch checkpoint verification.
+    ocr_resume_completed_pages: bool = False
+    # Opt-in, project-local proofreading event evidence; no uploads or training.
+    proofreading_event_capture: bool = False
+    # Experimental engine-scoped raw PSM recognition reuse; disabled by default.
+    ocr_cache_tesseract_raw: bool = False
+    # Only skip Tesseract *diagnostic-only* passes in high-trust Paddle columns.
+    ocr_lazy_tesseract_diagnostics: bool = False
     # Page-level dual-OCR agreement thresholds used by list/status colouring.
     paddle_agreement_good: float = 0.95
     paddle_agreement_warn: float = 0.85
@@ -663,6 +714,34 @@ class AppSettings(metaclass=_AppSettingsMeta):
         # both normalized immediately rather than only at render/save time.
         if name in {"guide_opacity", "headword_marker_opacity", "illustration_fill_opacity"}:
             value = _normalize_display_opacity(value)
+        if name == "physical_row_projection_width_percent":
+            try:
+                value = float(value)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError("物理行墨迹投影采样宽度必须是 10–100% 的数字。") from exc
+            if not 10.0 <= value <= 100.0:  # also rejects NaN/infinity
+                raise ValueError("物理行墨迹投影采样宽度必须在 10–100% 单栏宽之间。")
+        if name.startswith("separator_y_ink_safe_") and name != "separator_y_ink_safe_gap":
+            allowed = {
+                "separator_y_ink_safe_max_fraction": (0.01, 0.30),
+                "separator_y_ink_safe_ink_threshold": (0.0, 255.0),
+                "separator_y_ink_safe_existing_ink_ratio": (0.0, 0.20),
+                "separator_y_ink_safe_gap_ink_ratio": (0.0, 0.10),
+            }
+            if name in allowed:
+                try:
+                    numeric = float(value)
+                except (ValueError, TypeError, OverflowError) as exc:
+                    raise ValueError(f"{name} 必须是数字。") from exc
+                low, high = allowed[name]
+                if not low <= numeric <= high:
+                    raise ValueError(f"{name} 必须在 {low}–{high} 之间。")
+                if name == "separator_y_ink_safe_ink_threshold":
+                    if not numeric.is_integer():
+                        raise ValueError(f"{name} 必须是整数。")
+                    value = int(numeric)
+                else:
+                    value = numeric
         object.__setattr__(self, name, value)
 
     @property
@@ -679,6 +758,9 @@ class AppSettings(metaclass=_AppSettingsMeta):
     @classmethod
     def from_json(cls, path: Path) -> "AppSettings":
         raw = json.loads(path.read_text(encoding="utf-8"))
+        # Existing project configs created before the 100%-width default
+        # retain the historical 60% when this field was absent.
+        raw.setdefault("paddle_separator_roi_width_ratio", 60.0)
         for name in ("guide_opacity", "headword_marker_opacity", "illustration_fill_opacity"):
             raw[name] = _normalize_display_opacity(raw.get(name, 40.0))
         raw = migrate_app_settings_payload(raw, cls)
@@ -718,6 +800,10 @@ class ProjectState:
             except Exception:
                 __version__ = "unknown"
             ensure_project_storage(root, __version__)
+        # Recover page-level PNG/manifest transactions before any export can start.
+        # An uncommitted transaction is rolled back; committed ones finish cleanup.
+        from .processing_publish import recover_incomplete_crop_publications
+        recover_incomplete_crop_publications(root)
         json_settings = active_settings_path(root)
         if json_settings.exists():
             settings = AppSettings.from_json(json_settings)

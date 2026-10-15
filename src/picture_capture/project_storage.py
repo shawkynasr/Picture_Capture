@@ -14,6 +14,8 @@ functions below choose the legacy locations until a v2 manifest exists.
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
+import hashlib
+from functools import lru_cache
 import json
 import shutil
 
@@ -38,21 +40,38 @@ def manifest_path(project_root: Path) -> Path:
     return storage_root(project_root) / MANIFEST_FILENAME
 
 
+@lru_cache(maxsize=256)
+def _parse_managed_manifest_cached(path_string: str, identity: tuple[int, ...]) -> bool:
+    """Parse once per observed filesystem version; never infer from path alone."""
+    del identity
+    try:
+        payload = json.loads(Path(path_string).read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or payload.get("format") != PROJECT_FORMAT:
+            return False
+        version = int(payload.get("format_version", 0) or 0)
+        return version >= PROJECT_FORMAT_VERSION
+    except (OSError, TypeError, ValueError, OverflowError):
+        return False
+
+
 def is_managed_project(project_root: Path) -> bool:
     path = manifest_path(project_root)
+    try:
+        stat = path.stat()
+    except OSError:
+        return False
     if not path.is_file():
         return False
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return False
-    if not isinstance(payload, dict) or payload.get("format") != PROJECT_FORMAT:
-        return False
-    try:
-        version = int(payload.get("format_version", 0) or 0)
-    except (TypeError, ValueError, OverflowError):
-        return False
-    return version >= PROJECT_FORMAT_VERSION
+    # File IDs detect atomic replace. ctime catches edits where mtime was reset.
+    identity = (
+        int(stat.st_dev), int(stat.st_ino), int(stat.st_size),
+        int(stat.st_mtime_ns), int(stat.st_ctime_ns),
+    )
+    return _parse_managed_manifest_cached(str(path), identity)
+
+
+def clear_managed_manifest_cache() -> None:
+    _parse_managed_manifest_cached.cache_clear()
 
 
 def settings_path(project_root: Path) -> Path:
@@ -285,6 +304,7 @@ def ensure_project_storage(project_root: Path, software_version: str) -> Path:
     else:
         payload = _manifest_payload(root, software_version)
     _write_json_atomic(manifest, payload)
+    clear_managed_manifest_cache()
     return target
 
 
@@ -334,7 +354,16 @@ def _iter_files(path: Path) -> Iterable[Path]:
 
 def _same_file_payload(source: Path, target: Path) -> bool:
     try:
-        return source.is_file() and target.is_file() and source.stat().st_size == target.stat().st_size
+        if not source.is_file() or not target.is_file() or source.stat().st_size != target.stat().st_size:
+            return False
+        # Size-only verification can accept a corrupt copy, then delete the only good source.
+        def digest(path: Path) -> bytes:
+            checksum = hashlib.sha256()
+            with path.open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    checksum.update(block)
+            return checksum.digest()
+        return digest(source) == digest(target)
     except OSError:
         return False
 
@@ -362,12 +391,22 @@ def migrate_legacy_project(project_root: Path, software_version: str) -> Migrati
         raise RuntimeError(f"发现上次未完成的迁移目录：{stage.name}。请先检查或删除后重试。")
 
     copied_pairs: list[tuple[Path, Path]] = []
+    destination_keys: dict[str, Path] = {}
     cleanup_files: list[Path] = []
     cleanup_dirs: list[Path] = []
+
+    def check_destination(source: Path, destination: Path) -> None:
+        # Guard case-folded collisions on Windows/macOS as well as exact collisions on Linux.
+        key = destination.relative_to(stage).as_posix().casefold()
+        previous = destination_keys.get(key)
+        if previous is not None:
+            raise RuntimeError(f"迁移目标名称冲突：{previous} 与 {source}。原文件未删除。")
+        destination_keys[key] = source
 
     def copy_file(source: Path, destination: Path) -> None:
         if not source.is_file():
             return
+        check_destination(source, destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
         copied_pairs.append((source, destination))
@@ -394,6 +433,8 @@ def migrate_legacy_project(project_root: Path, software_version: str) -> Migrati
         legacy_qt = case_insensitive_child(root, "QT") or (root / "QT")
         if legacy_qt.is_dir():
             target_qt = stage / "QT"
+            for source in _iter_files(legacy_qt):
+                check_destination(source, target_qt / source.relative_to(legacy_qt))
             shutil.copytree(legacy_qt, target_qt, dirs_exist_ok=True, copy_function=shutil.copy2)
             for source in _iter_files(legacy_qt):
                 rel = source.relative_to(legacy_qt)
@@ -403,6 +444,8 @@ def migrate_legacy_project(project_root: Path, software_version: str) -> Migrati
         legacy_training = case_insensitive_child(root, "TrainingExports") or (root / "TrainingExports")
         if legacy_training.is_dir():
             target_training = stage / "output" / "TrainingExports"
+            for source in _iter_files(legacy_training):
+                check_destination(source, target_training / source.relative_to(legacy_training))
             shutil.copytree(legacy_training, target_training, dirs_exist_ok=True, copy_function=shutil.copy2)
             for source in _iter_files(legacy_training):
                 rel = source.relative_to(legacy_training)
@@ -459,3 +502,31 @@ def migrate_legacy_project(project_root: Path, software_version: str) -> Migrati
         if stage.exists():
             shutil.rmtree(stage, ignore_errors=True)
         raise
+
+
+def project_activity_path(project_root: Path) -> Path:
+    """Cheap per-project edit clock, independent of nested directory mtimes."""
+    root = Path(project_root)
+    if is_managed_project(root):
+        return storage_root(root) / ".activity"
+    return root / "QT" / ".activity"
+
+
+def note_page_artifact_edit(path: Path) -> None:
+    """Update the project-card edit clock after a successful PDIC/PPP publication."""
+    import os
+    artifact = Path(path)
+    if artifact.suffix.lower() not in {".pdic", ".ppp"}:
+        return
+    parent = artifact.parent
+    if parent.name in {"PDIC", "PPP"} and parent.parent.name == "data":
+        marker = parent.parent.parent / ".activity"
+    else:
+        marker = parent / "QT" / ".activity"
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+        os.utime(marker, None)
+    except OSError:
+        # Edit metadata is best effort and must never prevent data publication.
+        pass

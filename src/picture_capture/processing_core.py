@@ -30,8 +30,10 @@ from .formats import read_pdic, read_ppp, write_pdic, write_ppp
 from .project_storage import pdic_path_for_image, ppp_read_path_for_image, ppp_write_path_for_image, qt_root, special_pages_path
 from .processing_publish import _publish_file_transaction, _publish_temp_path
 from .crop.export_output import prepare_crop_background
+from .illustration_labels import previous_entry_ref_for_image
 from .crop_plan_formatting import (
     _normalized_crop_name,
+    canonical_polygon_link,
     entry_crop_piece_filename,
     page_crop_plan_dict,
     polygon_display_name,
@@ -2401,15 +2403,25 @@ def _ordinary_marker_local_crop(
     """
     from .entry_classification import get_entry_classification
     from .entry_ocr_crop import entry_ocr_crop_box
+    from .entry_ocr_visual_scale import visual_oversized_head_height
 
+    metrics_height = (
+        float(row_metrics.line_height) if row_metrics is not None
+        else float(settings.character_height)
+    )
+    visual_height = visual_oversized_head_height(
+        canonical, entry, geometry, settings, line_height=metrics_height,
+    )
     box = entry_ocr_crop_box(
         entry,
         geometry,
         settings,
         canonical.size,
         row_metrics=row_metrics,
+        visual_head_height=visual_height,
     )
     meta = get_entry_classification(entry)
+    large_for_ocr = meta.entry_scale == "oversized" or visual_height > 0
     horizontal = str(getattr(settings, "layout_writing_mode", "")) == "horizontal-tb"
     if horizontal and source_image is not None:
         source_box = geometry.transform.canonical_box_to_source(
@@ -2417,9 +2429,9 @@ def _ordinary_marker_local_crop(
         )
         return (
             normalize_page_rgb(source_image.crop(source_box)),
-            meta.entry_scale == "oversized",
+            large_for_ocr,
         )
-    return normalize_page_rgb(canonical.crop(box)), meta.entry_scale == "oversized"
+    return normalize_page_rgb(canonical.crop(box)), large_for_ocr
 
 
 def ocr_existing_entry_words_from_markers(
@@ -2449,6 +2461,7 @@ def ocr_existing_entry_words_from_markers(
     from .entry_ocr_crop import resolve_entry_ocr_row_metrics
     from .ocr_channel import OcrChannelSession, OcrTextChoice, choose_ocr_text
     from .paddle_headwords import parse_headword_text
+    from .ordinary_marker_ocr_text import bracketed_ocr_lemma
 
     row_metrics = resolve_entry_ocr_row_metrics(
         image,
@@ -2471,11 +2484,11 @@ def ocr_existing_entry_words_from_markers(
     }
     targets = [
         entry for entry in ordered
-        if not (
-            (only_blank and str(entry.word or "").strip())
-            or bool(entry.manually_selected)
-        )
+        if not bool(entry.manually_selected)
+        and not (only_blank and str(entry.word or "").strip())
     ]
+    # Preserve the established blank-only stats contract: populated manual
+    # entries are also reported as pre-existing words in that legacy mode.
     stats["skipped_existing"] = sum(
         1 for entry in ordered if only_blank and str(entry.word or "").strip()
     )
@@ -2488,11 +2501,21 @@ def ocr_existing_entry_words_from_markers(
         return ordered, stats
 
     channel = OcrChannelSession(effective)
+    # This path fills already-drawn markers, not OCR-line detection. Only
+    # CJK bracketed dictionary profiles authorize the optional one-sided
+    # 【/】 text cleanup; the user replacement-rule toggle is independent.
+    bracket_profile = bool(
+        getattr(effective, "profile_cjk_allow_bracketed_headword", False)
+        and profile.uses_parser("cjk_bracketed")
+    )
 
     def parsed_or_raw(raw: str) -> str:
         text = str(raw or "").strip()
         if not text:
             return ""
+        bracketed = bracketed_ocr_lemma(text, enabled=bracket_profile)
+        if bracketed is not None:
+            return bracketed
         parsed = parse_headword_text(text, effective, profile=profile)
         if parsed is not None and str(parsed.normalized or "").strip():
             return str(parsed.normalized).strip()
@@ -2602,6 +2625,9 @@ def ocr_existing_entry_words_from_markers(
         confidence = selected.confidence if selected is not None else None
 
         if word:
+            bracketed = bracketed_ocr_lemma(word, enabled=bracket_profile)
+            if bracketed is not None:
+                word = bracketed
             if effective.ocr_replace:
                 word = process_ocr_text(
                     word,
@@ -2625,6 +2651,14 @@ def ocr_existing_entry_words_from_markers(
             stats["filled"] += 1
         else:
             stats["failed"] += 1
+            if not only_blank:
+                # Explicit OCR replacement must not leave previous OCR text
+                # masquerading as the result of this fresh recognition pass.
+                # Manual selections never reach this branch.
+                entry.word = ""
+                entry.confidence = None
+                entry.ocr_source = ""
+                entry.final_engine = ""
 
         if int(entry.x) != original_x or int(entry.y) != original_y:
             raise RuntimeError("普通画线后OCR文字不得修改任何画线坐标")
@@ -2645,6 +2679,20 @@ def ocr_entries(
         image, settings, profile_page_index,
     )
     results: list[str] = []
+    # The legacy text-only OCR consumer must use the same bracketed-lemma
+    # boundary as ordinary drawn-marker OCR. A concrete CJK Profile and the
+    # user's bracket-structure toggle are both required.
+    from .dictionary_profile import effective_project_profile_id, load_dictionary_profile
+    from .ordinary_marker_ocr_text import bracketed_ocr_lemma
+    profile = load_dictionary_profile(
+        None,
+        preset=effective_project_profile_id(effective, None),
+        language=effective.ocr_language,
+    )
+    bracket_profile = bool(
+        getattr(effective, "profile_cjk_allow_bracketed_headword", False)
+        and profile.uses_parser("cjk_bracketed")
+    )
     paddle_engine = None
     if effective.ocr_engine == "paddleocr":
         from .paddle_headwords import get_paddle_engine
@@ -2659,7 +2707,13 @@ def ocr_entries(
             raw = run_tesseract(
                 crop, resolved_tesseract_language(effective), effective.ocr_executable, psm=psm
             )
-        results.append(process_ocr_text(raw, replace_rules, effective.lowercase_ocr) if effective.ocr_replace else raw.strip())
+        text = process_ocr_text(
+            raw, replace_rules, effective.lowercase_ocr,
+        ) if effective.ocr_replace else str(raw or "").strip()
+        # Clean after replacement as well: user rules may preserve or rewrite
+        # delimiters. Otherwise use the same untouched result as before.
+        lemma = bracketed_ocr_lemma(text, enabled=bracket_profile)
+        results.append(lemma if lemma is not None else text)
     return results
 
 
@@ -3059,10 +3113,13 @@ def build_page_crop_plan(
     entry_left_padding: int = 0, entry_right_padding: int = 0,
     integrate_illustrations: bool = True, profile_page_index: int = 0,
     page_sections: list[PageSection] | None = None, auxiliary_lines=None,
+    page_stem: str | None = None,
+    previous_entry_ref: tuple[str, int] | None = None,
 ) -> PageCropPlan:
     """Plan entry and PPP crops before any pixels are written.
 
-    PPP display names associate to headwords by normalized exact name.  Linked
+    Canonical PPP labels link by explicit page + zero-based PDIC ordinal;
+    historical free-text labels still link by normalized exact headword.
     PPPs contained by or intersecting their entry crop travel with that entry;
     linked PPPs completely outside become standalone P images. Unlinked PPPs are
     standalone and are removed from ordinary entry crops.
@@ -3089,6 +3146,15 @@ def build_page_crop_plan(
             piece_indices_by_entry.setdefault(piece.entry_ref_index,[]).append(pos)
     names: dict[str,list[int]] = {}
     for i,entry in enumerate(ordered): names.setdefault(_normalized_crop_name(entry.word),[]).append(i)
+    # Index -1 denotes the existing WW_000 previous-page continuation pieces;
+    # it never indexes the current PDIC. Keep the original output filenames.
+    previous_positions = [
+        pos for pos, piece in enumerate(pieces)
+        if piece.entry_ref_index is None and piece.output_index == 0
+    ]
+    if previous_entry_ref is not None and previous_positions:
+        boxes_by_entry[-1] = [pieces[pos].box for pos in previous_positions]
+        piece_indices_by_entry[-1] = previous_positions
     effective = effective_page_settings(settings, image.size, profile_page_index)
     illustration_top = effective.start_y if top_y is None else int(top_y)
     illustration_bottom = 0 if bottom_y is None else int(bottom_y)
@@ -3101,7 +3167,17 @@ def build_page_crop_plan(
     partial_merge: dict[int,list[int]] = {}
     for pi,region in enumerate(polygons):
         name=polygon_display_name(region,pi)
-        candidates=names.get(_normalized_crop_name(name),[])
+        saved_link = canonical_polygon_link(region)
+        if saved_link is None:
+            candidates = names.get(_normalized_crop_name(name), [])
+        else:
+            source_page, linked_index = saved_link
+            candidates = []
+            if linked_index is not None:
+                if page_stem is not None and source_page == page_stem and 0 <= linked_index < len(ordered):
+                    candidates = [linked_index]
+                elif previous_entry_ref == saved_link and previous_positions:
+                    candidates = [-1]
         chosen=None; relation="unassociated"
         if candidates:
             scored=[]
@@ -3114,7 +3190,8 @@ def build_page_crop_plan(
                 overlap=sum(_box_intersection_area(pbox,b) for b in boxes) if pbox else 0
                 scored.append((rank,overlap,-ei,ei,rel))
             _rank,_overlap,_neg,chosen,relation=max(scored)
-        word=ordered[chosen].word if chosen is not None else ""
+        word = (ordered[chosen].word if chosen is not None and chosen >= 0
+                else "_上页末词条_" if chosen == -1 else "")
         box=illustration_polygon_box(image,region,top=top,bottom=bottom,margin_px=margin_px)
         standalone = relation in {"outside", "unassociated"} or (relation == "partial" and not integrate_illustrations)
         illustrations.append(IllustrationCropPlan(pi,name,chosen,word,relation,standalone,box))
@@ -3127,6 +3204,9 @@ def build_page_crop_plan(
                 best=max(candidates_pieces,key=lambda pos:_box_intersection_area(pbox,pieces[pos].box) if pbox else 0)
                 partial_merge.setdefault(best,[]).append(pi)
     illustrated_entries=set(linked_inside)
+    if -1 in illustrated_entries:
+        for pos in previous_positions:
+            pieces[pos].entry_ref_index = -1
     for pos,piece in enumerate(pieces):
         if piece.entry_ref_index in illustrated_entries:
             piece.source_mode="linked_original"
@@ -3192,6 +3272,7 @@ def split_whole_entries(
     integrate_illustrations: bool = True, profile_page_index: int = 0,
     page_sections: list[PageSection] | None = None,
     transparent_background: bool = False,
+    previous_entry_ref: tuple[str, int] | None = None,
 ) -> list[CropRecord]:
     with Image.open(image_path) as opened:
         image = normalize_page_rgb(opened)
@@ -3204,6 +3285,7 @@ def split_whole_entries(
         integrate_illustrations=integrate_illustrations,
         profile_page_index=profile_page_index, page_sections=page_sections,
         auxiliary_lines=read_auxiliary_lines(image_path),
+        page_stem=image_path.stem, previous_entry_ref=previous_entry_ref,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     records: list[CropRecord] = []
@@ -3299,6 +3381,18 @@ def split_whole_entries(
         manifest_temp = _stage_text_file(manifest_target, manifest)
         staged.append(manifest_temp)
         replacements.append((manifest_temp, manifest_target))
+
+        # Natural widths must not be inferred later from already-padded PNGs.
+        width_target = output_dir / f"{image_path.stem}.PWWWidths.json"
+        width_temp = _stage_text_file(
+            width_target,
+            json.dumps({
+                record.filename: max(1, record.box[2] - record.box[0])
+                for record in ordered_records
+            }, ensure_ascii=False, sort_keys=True),
+        )
+        staged.append(width_temp)
+        replacements.append((width_temp, width_target))
         plan_temp, plan_target = _stage_page_crop_plan(
             image_path.parent, image_path.stem, plan,
         )
@@ -3368,6 +3462,7 @@ def detect_illustration_regions(
 
 def detect_illustrations_to_ppp(
     image_path: Path, settings: AppSettings, *, profile_page_index: int = 0,
+    detected_regions: list[PolygonRegion] | None = None,
 ) -> dict[str, int]:
     """Detect illustrations and safely update one page's PPP file.
 
@@ -3379,8 +3474,11 @@ def detect_illustrations_to_ppp(
     write_path = ppp_write_path_for_image(image_path)
     existing = read_ppp(read_path)
     manual = [r for r in existing if not is_auto_illustration_region(r)]
-    detected = detect_illustration_regions(
-        image_path, settings, profile_page_index=profile_page_index,
+    detected = (
+        list(detected_regions) if detected_regions is not None else
+        detect_illustration_regions(
+            image_path, settings, profile_page_index=profile_page_index,
+        )
     )
     manual_boxes = [b for r in manual if (b := _polygon_bbox(r)) is not None]
     accepted: list[PolygonRegion] = []
@@ -3391,9 +3489,8 @@ def detect_illustrations_to_ppp(
         if any(_overlap_fraction(box, mb) >= 0.25 for mb in manual_boxes):
             continue
         accepted.append(region)
-    for index, region in enumerate(accepted, 1):
-        region.label = f"{image_path.stem}|AUTO_{index:02d}|1|{image_path.stem}|"
-    write_ppp(write_path, manual + accepted, image_path.stem)
+    from .illustration_labels import write_ordered_auto_ppp
+    write_ordered_auto_ppp(write_path, manual, accepted, image_path, settings, profile_page_index)
     return {"manual": len(manual), "auto": len(accepted), "total": len(manual) + len(accepted)}
 
 
@@ -3498,6 +3595,7 @@ def split_illustrations(
     profile_page_index: int = 0,
     page_sections: list[PageSection] | None = None,
     transparent_background: bool = False,
+    previous_entry_ref: tuple[str, int] | None = None,
 ) -> IllustrationSplitResult:
     """Export only PPPs that are not already carried by an associated entry crop."""
     with Image.open(image_path) as opened:
@@ -3514,6 +3612,7 @@ def split_illustrations(
             integrate_illustrations=integrate_illustrations,
             profile_page_index=profile_page_index, page_sections=page_sections,
             auxiliary_lines=read_auxiliary_lines(image_path),
+            page_stem=image_path.stem, previous_entry_ref=previous_entry_ref,
         )
     finally:
         rgb_for_plan.close()
@@ -3557,7 +3656,7 @@ def split_illustrations(
             draw.polygon([(x-box[0], y-box[1]) for x, y in region.points], fill=255)
             crop.putalpha(mask)
             formatted = prepare_crop_background(crop, transparent=transparent_background)
-            if decision.associated_entry_index is not None:
+            if decision.associated_entry_index is not None and decision.associated_entry_index >= 0:
                 ei = decision.associated_entry_index
                 p_counter[ei] = p_counter.get(ei, 0) + 1
                 filename = f"{image_path.stem}_WW_{ei:03d}(P{p_counter[ei]}).png"
@@ -3658,6 +3757,7 @@ def split_whole_entries_job(
     integrate_illustrations: bool = True,
     profile_page_index: int = 0,
     transparent_background: bool = False,
+    previous_image_path: str | Path | None = None,
 ) -> list[CropRecord]:
     """Spawn-safe worker: build the crop plan first, then execute it."""
     page = Path(image_path)
@@ -3669,6 +3769,7 @@ def split_whole_entries_job(
         integrate_illustrations=integrate_illustrations,
         profile_page_index=profile_page_index,
         transparent_background=transparent_background,
+        previous_entry_ref=previous_entry_ref_for_image(previous_image_path),
     )
 
 
@@ -3686,6 +3787,7 @@ def split_illustrations_job(
     integrate_illustrations: bool = True,
     profile_page_index: int = 0,
     transparent_background: bool = False,
+    previous_image_path: str | Path | None = None,
 ) -> IllustrationSplitResult:
     """Spawn-safe worker: plan PPP/entry relations before exporting standalone PPPs."""
     page = Path(image_path)
@@ -3697,4 +3799,5 @@ def split_illustrations_job(
         integrate_illustrations=integrate_illustrations,
         profile_page_index=profile_page_index,
         transparent_background=transparent_background,
+        previous_entry_ref=previous_entry_ref_for_image(previous_image_path),
     )

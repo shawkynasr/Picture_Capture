@@ -1841,7 +1841,11 @@ def test_v2810_save_current_page_is_mode_specific():
     end = text.index("    def save_current_page(", start)
     block = text[start:end]
     assert 'if self.polygon_draw_var.get() and not getattr(self, "_batch_allow_pdic_edits", False):' in block
-    assert "write_ppp(target, self.polygons, self.current_page.stem)" in block
+    # PPP still has its own mode-specific save path, but now passes through
+    # the disk-first canonical-label writer rather than serializing raw labels.
+    assert "self._save_normalized_ppp()" in block
+    assert 'return target' in block
+    assert 'self._illustration_controller_for_call().persist_current()' in text
     assert "self.save_pdic(silent=True, sync_editors=sync_editors)" in block
     assert "self.polygon_var.get()" not in block
 
@@ -3979,8 +3983,9 @@ def test_v298_existing_word_source_selection_is_separate_and_refill_reuses_cache
 def test_v298_action_row_exposes_select_then_fill_buttons():
     source = Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "app.py"
     text = source.read_text(encoding="utf-8")
-    assert '("备份PDIC", self.backup_pdic)' in text
-    assert '("恢复PDIC", self.restore_from_pdic_backup)' in text
+    task = (Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "ui" / "compact_task_menus.py").read_text(encoding="utf-8")
+    assert '("备份PDIC", "backup_pdic")' in task
+    assert '("恢复PDIC", "restore_from_pdic_backup")' in task
 
 
 def test_v296_batch_queue_polling_yields_between_large_progress_bursts():
@@ -4462,15 +4467,19 @@ def test_v2101_auto_illustration_detection_writes_ppp_and_preserves_manual(tmp_p
     saved = read_ppp(page.with_suffix(".ppp"))
     assert first["manual"] == 1
     assert first["auto"] >= 1
-    assert any(r.label == "manual" for r in saved)
+    assert sum(r.points == manual.points for r in saved) == 1
+    assert all(r.label.startswith("P_") and f"|{page.stem}|" in r.label for r in saved)
     assert any("|AUTO_" in r.label for r in saved)
+    assert next(r for r in saved if r.points == manual.points).label.endswith("|xxx")
 
     # Rerun must replace AUTO polygons rather than append duplicates.
     second = detect_illustrations_to_ppp(page, settings)
     saved2 = read_ppp(page.with_suffix(".ppp"))
     assert second["manual"] == 1
     assert sum("|AUTO_" in r.label for r in saved2) == second["auto"]
-    assert sum(r.label == "manual" for r in saved2) == 1
+    assert sum(r.points == manual.points for r in saved2) == 1
+    assert not any("|AUTO_" in r.label for r in saved2 if r.points == manual.points)
+    assert len({r.label.split("|")[0] for r in saved2}) == len(saved2)
 
 
 def test_v2101_illustration_detection_button_uses_selected_scope_and_auto_ppp():
@@ -4478,7 +4487,8 @@ def test_v2101_illustration_detection_button_uses_selected_scope_and_auto_ppp():
     root = Path(__file__).parents[1]
     app = (root / "src" / "picture_capture" / "app.py").read_text(encoding="utf-8")
     controller = (root / "src" / "picture_capture" / "ui" / "controllers" / "illustration.py").read_text(encoding="utf-8")
-    assert '("插图识别", self.detect_illustrations_selected_scope)' in app
+    task = (Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "ui" / "compact_task_menus.py").read_text(encoding="utf-8")
+    assert '("插图识别", "detect_illustrations_selected_scope")' in task
     start = app.index("    def detect_illustrations_selected_scope(")
     end = app.index("    def split_illustrations_selected_scope(", start)
     wrapper = app[start:end]
@@ -4721,7 +4731,8 @@ def test_main_crop_preview_is_selected_only_through_display_mode():
         / "src" / "picture_capture" / "ui" / "controllers" / "canvas.py"
     ).read_text(encoding="utf-8")
     assert 'text="显示切图预览"' not in text
-    assert 'values=("原图+标注", "二值+标注", "仅原图", "仅二值", "切图预览")' in text
+    from picture_capture.ui.compact_display_menu import DISPLAY_MODES
+    assert all(mode in DISPLAY_MODES for mode in ("原图+标注", "二值+标注", "仅原图", "仅二值", "切图预览"))
     assert '"切图预览": (False, False, True)' in controller_text
     assert 'def _draw_crop_plan_preview' in text
 
@@ -4731,12 +4742,11 @@ def test_display_mode_and_color_mode_live_at_bottom_of_auxiliary_options():
     text = (root / "app.py").read_text(encoding="utf-8")
     workspace = (root / "ui/workspace_tools.py").read_text(encoding="utf-8")
     controller=(root / "ui/controllers/canvas.py").read_text(encoding="utf-8")
-    assert 'text="显示模式："' in text
-    assert 'values=("原图+标注", "二值+标注", "仅原图", "仅二值", "切图预览")' in text
-    assert 'display_mode_combo.bind("<<ComboboxSelected>>", self._apply_display_mode)' in text
-    assert 'text="颜色模式："' in text
-    assert 'textvariable=self.appearance_mode_var' in text
-    assert 'values=tuple(APPEARANCE_MODE_VALUES)' in text
+    from picture_capture.ui.compact_display_menu import DISPLAY_MODES
+    display = (root / "ui/compact_display_menu.py").read_text(encoding="utf-8")
+    assert 'dropdown("显示模式", app.display_mode_var, DISPLAY_MODES, app._apply_display_mode)' in display
+    assert 'dropdown("颜色模式", app.appearance_mode_var,' in display
+    assert all(mode in DISPLAY_MODES for mode in ("原图+标注", "二值+标注", "仅原图", "仅二值", "切图预览"))
     page_toolbar=text.split('page_panel = ttk.Frame(sidebar,',1)[1].split('list_frame = ttk.Frame(page_panel)',1)[0]
     assert 'text="显示模式："' not in page_toolbar
     for mode in ('"原图+标注"','"二值+标注"','"仅原图"','"仅二值"','"切图预览"'):
@@ -4768,31 +4778,22 @@ def test_page_list_compact_labels_navigation_order_and_consistency_minimum():
 def test_action_and_postproduction_rows_use_equal_width_grid_columns():
     source = Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "app.py"
     text = source.read_text(encoding="utf-8")
-    actions_start = text.index('            parent, "四、画线 / OCR / 插图 / 校对"')
-    actions_end = text.index("        postproduction = self._section_frame(", actions_start)
-    actions = text[actions_start:actions_end]
-    assert 'row.columnconfigure(bi, weight=1, uniform=f"actions-row-{ri}")' in actions
-    assert 'button.grid(' in actions
-    assert 'button.pack(side="left", fill="x", expand=True' not in actions
-
-    post_start = text.index("        postproduction = self._section_frame(", actions_end)
-    post_end = text.index("        # Main-panel parameters are live:", post_start)
-    post = text[post_start:post_end]
-    assert 'row.columnconfigure(bi, weight=1, uniform=f"postproduction-row-{ri}")' in post
-    assert 'button.grid(' in post
-    assert 'button.pack(side="left", fill="x", expand=True' not in post
+    from picture_capture.ui.compact_task_menus import ACTION_GROUPS, POSTPRODUCTION_ACTIONS
+    tasks = (Path(__file__).resolve().parents[1] / "src/picture_capture/ui/compact_task_menus.py").read_text(encoding="utf-8")
+    assert ACTION_GROUPS and POSTPRODUCTION_ACTIONS
+    assert 'button.pack(side="left", fill="x" if expand else "none", expand=expand' in tasks
+    assert 'for group in ACTION_GROUPS:' in tasks
+    assert 'for group in POSTPRODUCTION_ACTIONS:' in tasks
 
 
 def test_main_quick_parameter_entries_are_left_aligned():
     source = Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "app.py"
     text = source.read_text(encoding="utf-8")
-    start = text.index("    def _build_quick_settings(")
-    end = text.index("\n    @staticmethod\n    def _style_color_button", start)
-    quick = text[start:end]
-    assert 'justify="right" if cast in {int, float} else "left"' not in quick
-    assert 'justify="left"' in quick
-    # Every explicit quick-panel Entry should declare left alignment.
-    assert quick.count("ttk.Entry(") == quick.count('justify="left"')
+    # Compact numeric settings use a consistent centred input, unlike the
+    # defunct full-width legacy menu which used left-aligned text inputs.
+    compact = (Path(__file__).resolve().parents[1] / "src/picture_capture/ui/compact_task_menus.py").read_text(encoding="utf-8")
+    assert '_build_quick_settings(' not in text
+    assert 'ttk.Entry(row, textvariable=variable, width=width, justify="center")' in compact
 
 
 def test_entry_default_color_and_bookmarks_persist(tmp_path):
@@ -4949,7 +4950,8 @@ def test_v2111_rectangular_ppp_supports_four_side_drag_geometry():
 def test_v2111_ui_restores_hide_overlay_and_removes_crop_dialog_preview():
     source = Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "app.py"
     text = source.read_text(encoding="utf-8")
-    assert 'text="隐藏线框(插图除外)"' in text
+    display = (Path(__file__).resolve().parents[1] / "src/picture_capture/ui/compact_display_menu.py").read_text(encoding="utf-8")
+    assert 'check(line(), "隐藏线框（插图除外）", app.hide_var, app._toggle_hide_overlays)' in display
     crop_class = (Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "ui" / "dialogs" / "crop_settings.py").read_text(encoding="utf-8")
     assert 'preview_canvas' not in crop_class
     assert '主界面完整预览' not in crop_class
@@ -4966,7 +4968,8 @@ def test_v2113_gui_paths_do_not_use_raw_xy_entry_sort():
 
 def test_v2113_repair_pdic_order_button_is_exposed():
     app_text = (Path(__file__).parents[1] / "src" / "picture_capture" / "app.py").read_text(encoding="utf-8")
-    assert '("修复排序", self.repair_pdic_order_selected_scope)' in app_text
+    task = (Path(__file__).resolve().parents[1] / "src" / "picture_capture" / "ui" / "compact_task_menus.py").read_text(encoding="utf-8")
+    assert '("修复排序", "repair_pdic_order_selected_scope")' in task
 
 
 def test_v2113_canonical_reorder_preserves_word_coordinate_binding():
@@ -5271,9 +5274,10 @@ def test_v21110_backup_skips_unrelated_full_page_metadata_refresh():
 
 def test_v21111_illustration_button_is_renamed_to_edit_only():
     app_text = (Path(__file__).parents[1] / "src" / "picture_capture" / "app.py").read_text(encoding="utf-8")
-    assert '("编辑插图", self.toggle_polygon_drawing)' in app_text
+    task = (Path(__file__).resolve().parents[1] / "src/picture_capture/ui/compact_task_menus.py").read_text(encoding="utf-8")
+    assert '("编辑插图", "toggle_polygon_drawing")' in task
     assert '绘制/编辑插图' not in app_text
-    assert 'text="结束编辑插图"' in app_text
+    assert 'button.configure(text="结束编辑插图"' in task
 
 
 def test_v21111_picdic_index_export_is_background_streaming_and_exact_format():
@@ -5286,7 +5290,8 @@ def test_v21111_picdic_index_export_is_background_streaming_and_exact_format():
     start = controller_text.index("    def export_picdic_index(self) -> None:")
     end = controller_text.index("    def backup_pdic(self) -> None:", start)
     body = controller_text[start:end]
-    assert '("导出PicDic索引", self.export_picdic_index)' in app_text
+    task = (Path(__file__).resolve().parents[1] / "src/picture_capture/ui/compact_task_menus.py").read_text(encoding="utf-8")
+    assert '("导出PicDic索引", "export_picdic_index")' in task
     assert "self._export_controller_for_call().export_picdic_index()" in wrapper
     assert 'read_picdic_index_records(' in body
     assert 'pdic_path(page), fallback_page=page.stem' in body
@@ -5420,13 +5425,16 @@ def test_auxiliary_overlay_defaults_and_label_style_controls():
     assert settings.batch_interval == 3.0
     app_text = (Path(__file__).parents[1] / "src" / "picture_capture" / "app.py").read_text(encoding="utf-8")
     overlay = (Path(__file__).parents[1] / "src/picture_capture/ui/entry_overlay_builder.py").read_text(encoding="utf-8")
+    state = (Path(__file__).parents[1] / "src/picture_capture/ui/quick_state.py").read_text(encoding="utf-8")
+    display = (Path(__file__).parents[1] / "src/picture_capture/ui/compact_display_menu.py").read_text(encoding="utf-8")
     for token in (
         '"illustration_outline_width"', '"illustration_label_border_width"',
         '"illustration_label_font_family"', '"illustration_label_font_size"',
         '"illustration_label_font_bold"', '"illustration_label_font_italic"',
     ):
-        assert token in app_text
-    assert 'self.quick_bool_vars["show_illustration_labels"]' in app_text
+        assert token in state
+    assert '"show_illustration_labels"' in state
+    assert 'qb["show_illustration_labels"]' in display
     assert 'show_shapes = bool(self.polygon_var.get() or self.polygon_draw_var.get())' in app_text
     assert 'show_labels = bool(self.settings.show_illustration_labels)' in app_text
 
@@ -5446,11 +5454,21 @@ def test_auxiliary_overlay_defaults_and_label_style_controls():
     assert 'marker_control_bg = str(self.settings.headword_marker_color)' not in app_text
     assert 'record["index_widget"] = index_label' in overlay
     assert 'record["delete_widget"] = delete_button' in overlay
-    assert 'text="[X]"' in overlay
-    assert 'bg="#9d042f"' in overlay
-    assert 'activebackground="#9d042f"' in overlay
-    assert 'self._attach_tooltip(delete_button, "点击删除该画线!")' in overlay
-    assert 'delete_x = float(index_x - index_width - 1)' in overlay
+    shared_delete = (
+        Path(__file__).parents[1] / "src/picture_capture/ui/overlay_delete_button.py"
+    ).read_text(encoding="utf-8")
+    assert 'text="[X]"' in shared_delete
+    assert 'bg=("#9d042f" if kind == "entry" else "#f5b83d")' in shared_delete
+    assert 'activebackground=("#9d042f" if kind == "entry" else "#e9a820")' in shared_delete
+    assert 'tooltip="点击删除该画线!"' in overlay
+    # The marker-owned [X] now occupies the resolved column end, rather
+    # than borrowing the index label's screen position. The dedicated
+    # runtime overlay test checks pixel geometry and four visibility states.
+    assert 'delete_x = marker_right_screen_x' in overlay
+    # Updated layout contract: [X] is outside the full-width editor at
+    # the actual column boundary, mirrored for RTL.
+    assert 'delete_anchor = "ne"' in overlay
+    assert 'horizontal_entry_editor_slot(' in overlay
 
 
 def test_platform_language_font_recommendations_and_auto_normalization():
@@ -5489,7 +5507,8 @@ def test_all_configurable_content_font_paths_use_shared_auto_resolver():
     assert "self.settings.illustration_label_font_family,\n                                self.settings.ocr_language" in app_text
     assert "self.parent.settings.review_entry_font_family,\n                self.parent.settings.ocr_language" in app_text
     assert '"review_simplified_font_family"' in app_text
-    assert "values=content_font_values" in app_text
+    display = (Path(__file__).parents[1] / "src/picture_capture/ui/compact_display_menu.py").read_text(encoding="utf-8")
+    assert 'values=families' in display
     assert "review_families = (AUTO_FONT_FAMILY" in app_text
 
 
@@ -6103,7 +6122,11 @@ def test_sidebar_scroll_review_height_controls_and_normal_process_worker_are_wir
     detect_end = text.index("    def clear_entries", detect_start)
     detect_block = text[detect_start:detect_end]
     assert 'ProcessPoolExecutor(max_workers=1' in detect_block
-    assert 'if method == "left_edge" else None' in detect_block
+    # A single ordinary page still uses the legacy one-process worker, while
+    # multi-page ordinary drawing uses the bounded independent page pool.
+    assert 'if method == "left_edge" and ordinary_workers <= 1 else None' in detect_block
+    assert 'if method == "left_edge" and ordinary_workers > 1:' in detect_block
+    assert 'foreground_page_edit=True,' in detect_block
     assert "detect_entries_job" in detect_block
 
 
@@ -6329,8 +6352,9 @@ def test_main_ocr_visibility_controls_apply_immediately_and_candidate_boxes_are_
     import picture_capture.app as app_module
 
     text = Path(inspect.getsourcefile(app_module)).read_text(encoding="utf-8")
-    assert 'command=lambda n=name, v=var: self._apply_overlay_visibility_toggle(n, v)' in text
-    assert '"paddle_show_candidate_checkboxes", candidate_var' in text
+    display = (Path(__file__).parents[1] / "src/picture_capture/ui/compact_display_menu.py").read_text(encoding="utf-8")
+    assert 'app._apply_overlay_visibility_toggle(setting, qb[setting])' in display
+    assert '"paddle_show_candidate_checkboxes"' in display
     start = text.index("        show_candidates = (")
     end = text.index("        show_shapes =", start)
     candidate_block = text[start:end]
@@ -6367,8 +6391,11 @@ def test_v21122_hotfix3_main_actions_put_compare_before_review():
         Path(__file__).resolve().parents[1]
         / "src" / "picture_capture" / "ui" / "dialogs" / "old_new_comparison.py"
     ).read_text(encoding="utf-8")
-    row = '(("清除画线", self.clear_entries), ("清除文本", self.clear_text), ("精修画线", self.refine_lines_selected_scope), ("新旧比较", self.compare_old_new_selected_scope), ("词条校对", self.open_review))'
-    assert row in text
+    task = (Path(__file__).resolve().parents[1] / "src/picture_capture/ui/compact_task_menus.py").read_text(encoding="utf-8")
+    for label, action in (("新旧比较", "compare_old_new_selected_scope"),
+                          ("词条校对", "open_review"),
+                          ("精修画线", "refine_lines_selected_scope")):
+        assert f'("{label}", "{action}")' in task
     assert "from .ui.dialogs.old_new_comparison import OldNewComparisonWindow" in text
     assert "class OldNewComparisonWindow" in dialog_text
     assert 'notebook.add(diff_tab, text="差异")' in dialog_text
@@ -6457,14 +6484,15 @@ def test_v21122_hotfix5_review_delete_commits_text_removes_shared_entry_and_dese
     result = ReviewWindow.delete_review_entry(review, 0)
 
     assert result == "break"
-    assert parent.entries == [second]
-    # All visible proofreading text is committed by identity before deletion.
-    assert second.word == "乙改"
-    assert candidate["selected"] is False
-    assert calls["override"] and calls["override"][0][1]["selected"] is False
-    assert calls["saved"] == [{"silent": True, "sync_editors": False}]
-    assert calls["redraw"] == 1
-    assert "已删除词条" in parent.status_var.value
+    # This legacy unit fixture has no saved project, no PDIC and dirty Tk
+    # text. R3 now correctly REFUSES the formerly unsafe manual-before-PDIC
+    # candidate delete. The new persisted success path has dedicated source-
+    # owned end-to-end tests in test_b3_candidate_owned_deletion_20261015.py.
+    assert parent.entries == [first, second]
+    assert second.word == "乙"
+    assert candidate["selected"] is True
+    assert calls == {"saved": [], "redraw": 0, "override": []}
+    assert "未执行" in parent.status_var.value
 
 
 
@@ -7404,7 +7432,10 @@ def test_review_highlight_uses_the_same_geometry_as_review_crop():
 
 
 def test_v2132_declares_cpu_and_gpu_ocr_profiles():
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10: pytest depends on tomli here.
+        import tomli as tomllib
     from pathlib import Path
 
     data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
@@ -7422,7 +7453,10 @@ def test_v2132_declares_cpu_and_gpu_ocr_profiles():
 
 def test_windows_ocr_installer_uses_thin_batch_and_locked_uv_profiles():
     import importlib.util
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10: pytest depends on tomli here.
+        import tomli as tomllib
     from pathlib import Path
 
     batch = Path("install_ocr_windows.bat").read_text(encoding="utf-8")
@@ -8006,13 +8040,13 @@ def test_main_auxiliary_section_controls_section_overlay_and_ocr_display_order()
     root = Path(__file__).resolve().parents[1] / "src/picture_capture"
     text = (root / "app.py").read_text(encoding="utf-8")
     workspace = (root / "ui/workspace_tools.py").read_text(encoding="utf-8")
-    aux=text.split('self._section_frame(parent, "二、显示设置"',1)[1].split('ocr = self._section_frame(parent, "三、共享 OCR 通道 / OCR画线"',1)[0]
-    assert 'text="显示标尺"' in aux
+    aux=(root / "ui/compact_display_menu.py").read_text(encoding="utf-8")
+    assert '"显示标尺"' in aux
     assert '"ruler_color"' in aux
-    assert 'text="显示Section"' in aux
+    assert '"显示区块"' in aux
     assert '"page_section_color"' in aux
     assert '"page_section_width"' in aux
-    assert aux.index('text="显示Section"') < aux.index('text="栏左垂线"')
+    assert aux.index('"显示区块"') < aux.index('"栏左垂线"')
     assert '"review_main_show_ocr_background"' in aux
     assert 'fill="#ffffff"' in text
     assert 'overlay_scale = self.view_scale / parameter_scale(self.image, self.settings)' in text
@@ -8151,14 +8185,14 @@ def test_review_filter_and_main_overlay_ui_contracts_are_exposed():
     helper_text = helper_source.read_text(encoding="utf-8")
     overlay = (root / "ui" / "entry_overlay_builder.py").read_text(encoding="utf-8")
 
-    assert '"一、版面参数"' in text
+    workspace = (root / "ui/workspace_tools.py").read_text(encoding="utf-8")
+    compact_ocr = (root / "ui/compact_task_menus.py").read_text(encoding="utf-8")
+    assert '"一、版面参数"' in workspace
     assert "页眉Y(原图)" not in text
     assert "页尾Y(原图)" not in text
     assert "正文起始Y(原图)" not in text
     assert "正文结束Y(原图)" not in text
-    assert 'text="  Y安全空间："' in text
-    safety = text.index('text="  Y安全空间："')
-    assert 'text="px"' in text[safety:safety + 900]
+    assert '"横线与文字安全距离px"' in compact_ocr
 
     assert 'text="校对模式："' in text
     assert 'self.focused_panel_title = tk.StringVar(value="▸ 重点筛选校对")' in text
@@ -8193,8 +8227,10 @@ def test_review_filter_and_main_overlay_ui_contracts_are_exposed():
     assert 'bg="#e6e6e6"' in overlay
     assert 'fg="#000000"' in overlay
     assert "def _entry_sequence_text(index: int, total: int) -> str:" in text
-    assert 'text="[X]"' in overlay
-    assert 'bg="#9d042f"' in overlay
+    shared_button = (root / "ui" / "overlay_delete_button.py").read_text(encoding="utf-8")
+    assert 'text="[X]"' in shared_button
+    assert 'bg=("#9d042f" if kind == "entry" else "#f5b83d")' in shared_button
+    assert 'create_overlay_delete_button(' in overlay
     assert 'record["delete_widget"] = delete_button' in overlay
 
 

@@ -231,7 +231,7 @@ def test_phase4o_runner_snapshots_settings_and_preserves_default_payload(monkeyp
         _RunnerSettings(start_y=17, crop_parallel_workers=6),
         17, 0, 0,
         str(Path("/pdic/page001.pdic")),
-        0, 0, True, 0,
+        0, 0, True, 0, False, None,
     )
     assert payload[3] is not app.settings
     assert app.ppp_reads == [Path("/pages/page001.png")]
@@ -314,7 +314,8 @@ def test_phase4o_app_wrapper_ui_binding_and_crop_runner_boundary_are_preserved()
         "def split_illustrations_selected_scope(self) -> None:\n"
         "        self._illustration_controller_for_call().split_illustrations_selected_scope()"
     ) in app
-    assert '("插图切图", self.split_illustrations_selected_scope)' in app
+    menu = (ROOT / "src/picture_capture/ui/compact_task_menus.py").read_text(encoding="utf-8")
+    assert '("插图切图", "split_illustrations_selected_scope")' in menu
     app_runner_start = app.index("    def _start_illustration_crop(")
     app_runner_end = app.index("    def build_picdic(", app_runner_start)
     app_runner_block = app[app_runner_start:app_runner_end]

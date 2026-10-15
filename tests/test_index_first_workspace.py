@@ -49,7 +49,7 @@ def test_page_index_visibility_is_mode_only_and_tools_unchanged():
     assert 'app.sidebar_canvas.pack_forget()' in tools
     assert 'simple_slot = ttk.Frame(' in tools
     assert '_set_simple_page_visible(app, compact)' in tools
-    assert 'app._build_quick_settings(content)' in tools
+    assert 'initialize_quick_state(app)' in tools
     assert 'popup.place(x=left, y=top, width=width, height=height)' in tools
     assert 'popup.place_forget()' in tools
     assert 'tk.Toplevel(' not in tools
@@ -85,7 +85,13 @@ def test_index_width_and_treeview_columns_fit_available_space():
     assert 'self.page_range_controls_row = range_row' in app
     assert 'min(preferred_sidebar_width(app), width - 160)' in tools
     assert 'font.nametofont("TkHeadingFont")' in app
-    assert 'orient="horizontal", command=self.page_list.xview' in app
+    assert 'orient="horizontal", command=self._page_list_hscroll' in app
+    horizontal_handler = app[
+        app.index('    def _page_list_hscroll('):
+        app.index('    def _page_list_yscroll(', app.index('    def _page_list_hscroll('))
+    ]
+    assert 'self.page_list.xview(*args)' in horizontal_handler
+    assert 'self._schedule_page_cell_overlay_refresh()' in horizontal_handler
     assert 'body_font.measure(name) for name in page_names' in app
     assert '"page": max(52, page_width)' in app
     assert 'self.page_list.column(column, width=width, anchor="center", stretch=False)' in app
@@ -356,7 +362,10 @@ def test_pinned_preview_and_every_inline_crop_coexist():
     end = app.index('    def _ordinary_review_photo(', start)
     render = app[start:end]
     assert 'photo = self._ordinary_review_photo(index)' in render
-    assert 'picture = ttk.Label(self.rows, image=photo' in render
+    # Every inline crop is still resident; its child label now shares one
+    # disposable row with the lower-aligned main-style sequence badge.
+    assert 'picture, sequence_label, crop_row = create_review_crop_with_index(' in render
+    assert 'self, self.rows, photo=photo, index=index, total=len(ordered)' in render
     assert 'self._review_row_pictures.append(picture)' in render
     assert 'if index != 0:' not in render
     active = app[app.index('    def set_active(self, index: int)'):]
@@ -372,75 +381,18 @@ def test_each_tool_menu_is_280px_and_vertically_scrollable():
     assert "width = min(TOOL_MENU_WIDTH, max(1, root_width - 12))" in tools
     assert "canvas.itemconfigure(item, width=max(1, event.width))" in tools
     assert "horizontal = ttk.Scrollbar(scroller" not in tools
-    assert "app._build_quick_settings(content)" in tools
-    assert "_stack_tool_menu_controls(content)" in tools
+    assert "initialize_quick_state(app)" in tools
+    assert "sections: dict[str, ttk.Frame] = {}" in tools
     assert 'app.bind_all("<MouseWheel>", scroll_menu_wheel, add="+")' in tools
     assert "popup.place(x=left, y=top, width=width, height=height)" in tools
 
 
-def test_tool_menu_reflow_preserves_controls_and_verticalizes_grid_pack(monkeypatch):
-    # Geometry-only test: no display server or actual Tk window is required.
-    class Control:
-        def __init__(self, mode="", row=0, col=0, children=(), title=None):
-            self.mode = mode
-            self.info = {"row": row, "column": col, "columnspan": 1}
-            self.children = tuple(children)
-            self.rows = []
-            self.columns = []
-            if title is not None:
-                self._collapse_title = title
-
-        def winfo_children(self):
-            return self.children
-
-        def winfo_manager(self):
-            return self.mode
-
-        def grid_info(self):
-            return self.info
-
-        def grid_forget(self):
-            self.mode = ""
-
-        def grid(self, **kwargs):
-            self.mode = "grid"
-            self.rows.append(kwargs)
-
-        def columnconfigure(self, column, **kwargs):
-            self.columns.append((column, kwargs))
-
-        def pack_info(self):
-            return {"side": "left"} if self.mode == "pack" else {}
-
-        def pack_forget(self):
-            self.mode = ""
-
-        def pack(self, **kwargs):
-            self.mode = "pack"
-            self.rows.append(kwargs)
-
-    # Only override class identity checks inside the helper. The objects keep
-    # their original identity, callback-bearing references and state.
-    for namespace in (workspace_tools.tk, workspace_tools.ttk):
-        monkeypatch.setattr(namespace, "Frame", Control)
-        monkeypatch.setattr(namespace, "LabelFrame", Control)
-
-    first = Control("grid", row=0, col=0)
-    second = Control("grid", row=0, col=2)
-    left = Control("pack")
-    right = Control("pack")
-    toolbar = Control("grid", row=1, col=0, children=(left, right))
-    section = Control(children=(toolbar, second, first), title="预处理")
-    root = Control(children=(section,))
-    workspace_tools._stack_tool_menu_controls(root)
-
-    assert [first.rows[-1]["row"], second.rows[-1]["row"], toolbar.rows[-1]["row"]] == [0, 1, 2]
-    assert all(widget.rows[-1]["column"] == 0 for widget in (first, second, toolbar))
-    assert all(widget.rows[-1]["sticky"] == "ew" for widget in (first, second, toolbar))
-    assert left.rows[-1]["side"] == right.rows[-1]["side"] == "top"
-    assert left.rows[-1]["fill"] == right.rows[-1]["fill"] == "x"
-    assert section.children == (toolbar, second, first)
-
+def test_legacy_builder_and_reflow_are_gone_from_compact_menus():
+    _, tools = sources()
+    assert "_stack_tool_menu_controls" not in tools
+    assert "def retire_superseded_quick_panels(" not in tools
+    assert "app._build_quick_settings(" not in tools
+    assert 'sections["五、后期词典制作"] = build_postproduction_menu(app, content)' in tools
 
 
 def test_extreme_mode_icons_and_abbreviated_run_actions():

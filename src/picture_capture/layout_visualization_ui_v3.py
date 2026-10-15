@@ -85,6 +85,28 @@ def on_layout_density_change(app: Any) -> None:
         show_layout_details_window(app)
 
 
+def toggle_layout_step_replay(app: Any) -> None:
+    """Single session-only callback shared by legacy and compact panels.
+
+    Both widgets bind to app._layout_step_replay_var. Opening/closing the
+    modeless replay window never changes display modes or persisted settings.
+    """
+    replay_var = getattr(app, "_layout_step_replay_var", None)
+    if replay_var is None:
+        return
+    if bool(replay_var.get()):
+        from .layout_step_replay_ui import show_layout_step_replay
+        try:
+            show_layout_step_replay(app)
+        except Exception:
+            replay_var.set(False)
+            raise
+    else:
+        window = getattr(app, "_layout_step_replay_window", None)
+        if window is not None:
+            window.close()
+
+
 def _add_layout_toggle(app: Any, section: Any) -> None:
     if getattr(app, "_layout_visualization_toggle_widget", None) is not None:
         return
@@ -109,6 +131,26 @@ def _add_layout_toggle(app: Any, section: Any) -> None:
     )
     checkbox.grid(row=row, column=0, columnspan=4, sticky="w", pady=(3, 0))
     app._layout_visualization_toggle_widget = checkbox
+
+    # Independent inspection mode. It does not toggle or modify normal Layout
+    # visibility, user settings, PDIC, or any drawing/export result.
+    replay_var = tk.BooleanVar(value=False)
+    app._layout_step_replay_var = replay_var
+
+    replay_widget = ttk.Checkbutton(
+        section, text="查看 LAYOUT 分析过程", variable=replay_var,
+        command=lambda: toggle_layout_step_replay(app),
+    )
+    replay_widget.grid(row=row+1, column=0, columnspan=4, sticky="w", pady=(2, 3))
+    app._layout_step_replay_widget = replay_widget
+    try:
+        app._attach_tooltip(
+            replay_widget,
+            "打开独立的只读分析回放窗口，可逐步查看实际物理行、缩进、"
+            "符号和大字头证据及最终行角色。关闭时不额外运行诊断。",
+        )
+    except Exception:
+        pass
 
     try:
         app._attach_tooltip(
@@ -185,7 +227,7 @@ def add_layout_visualization_controls(app: Any, section: Any) -> None:
     add_unified_layout_inspector_controls(app, section)
     from .large_head_visualization_ui import add_large_head_debug_controls
     add_large_head_debug_controls(app, section)
-    _add_denoise_control(app, section)
+    # Shared denoise settings now belong to Layout configuration, not display.
 
 
 def draw_layout_visualization_if_enabled(app: Any) -> None:

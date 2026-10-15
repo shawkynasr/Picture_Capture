@@ -1,7 +1,7 @@
 """Minimal icon rail and an overlay tool palette that never resizes the page.
 
-Quick-setting widgets are built exactly once, preserving existing commands and
-variables. A temporary popover can be pinned for image-and-parameter work.
+Quick-setting Tk variables are initialized once, independently of all visual
+menus. A compact task popover can be pinned for image-and-parameter work.
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from .compact_display_menu import build_compact_display_menu
 from .compact_headword_profile_menu import build_headword_profile_menu
 from .compact_task_menus import (
     build_preprocess_menu, build_layout_menu, build_ocr_menu,
-    build_drawing_menu,
+    build_drawing_menu, build_postproduction_menu,
 )
 from .simple_page_controls import (
     install_simple_page_controls, install_simple_page_tree_actions,
@@ -128,78 +128,6 @@ def _create_macaron_action_button(
     app.workspace_macaron_buttons.append(button)
     return button
 
-
-
-def _stack_tool_menu_controls(root: ttk.Frame) -> None:
-    """Reflow the existing quick-settings widgets into one vertical column.
-
-    This changes geometry managers *without recreating controls*, so Tk
-    variables, command callbacks, focus bindings and external widget
-    references all remain intact.  The original quick-settings layout was
-    designed for a broad sidebar and contains many multi-column grid rows
-    and packed horizontal toolbars; both must be stacked for a 280px menu.
-    """
-    containers = (tk.Frame, tk.LabelFrame, ttk.Frame, ttk.LabelFrame)
-
-    def stack(container: tk.Misc) -> None:
-        if not isinstance(container, containers):
-            return
-        children = tuple(container.winfo_children())
-        gridded = [child for child in children if child.winfo_manager() == "grid"]
-        if gridded:
-            ordered = sorted(
-                gridded,
-                key=lambda child: (
-                    int(child.grid_info()["row"]),
-                    int(child.grid_info()["column"]),
-                ),
-            )
-            columns = max(
-                int(child.grid_info()["column"]) +
-                int(child.grid_info().get("columnspan", 1))
-                for child in ordered
-            )
-            # Reset weights from the legacy wide/multi-column grid.
-            for col in range(columns):
-                container.columnconfigure(col, weight=0, minsize=0, uniform="")
-            container.columnconfigure(0, weight=1)
-            for child in ordered:
-                child.grid_forget()
-            for row, child in enumerate(ordered):
-                child.grid(
-                    row=row, column=0, sticky="ew",
-                    padx=(3, 3), pady=(2, 2),
-                )
-        else:
-            packed = [child for child in children if child.winfo_manager() == "pack"]
-            if len(packed) > 1 and any(
-                child.pack_info().get("side") in ("left", "right")
-                for child in packed
-            ):
-                for child in packed:
-                    child.pack_forget()
-                for child in packed:
-                    # Keep small colour swatches and unit labels intrinsic,
-                    # while buttons, selectors and other inputs use the width.
-                    intrinsic = isinstance(child, (tk.Label, ttk.Label)) or (
-                        isinstance(child, tk.Button) and
-                        str(child.cget("text")) == ""
-                    )
-                    child.pack(
-                        side="top", anchor="w",
-                        fill="none" if intrinsic else "x",
-                        padx=(3, 3), pady=(2, 2),
-                    )
-        for child in children:
-            if isinstance(child, (tk.Label, ttk.Label)):
-                # A long description should wrap rather than set a wide
-                # requested size in the narrow task palette.
-                child.configure(wraplength=204)
-            stack(child)
-
-    for section in root.winfo_children():
-        if getattr(section, "_collapse_title", None):
-            stack(section)
 
 
 def _draw_rail_icon(canvas: tk.Canvas, kind: str) -> None:
@@ -381,22 +309,19 @@ def install_workspace_tools(app: Any, sidebar: ttk.Frame, sidebar_host: ttk.Fram
     app.bind_all("<MouseWheel>", scroll_menu_wheel, add="+")
     app.bind_all("<Button-4>", lambda event: scroll_menu(event, -3), add="+")
     app.bind_all("<Button-5>", lambda event: scroll_menu(event, 3), add="+")
-    app._build_quick_settings(content)
-    _stack_tool_menu_controls(content)
-    sections = {
-        str(section._collapse_title): section
-        for section in content.winfo_children()
-        if getattr(section, "_collapse_title", None)
-    }
-    # The old display section still owns its already-bound quick variables,
-    # but it is never shown. A purpose-built, 280px display panel presents
-    # exactly the requested order without duplicating variable state.
+    # All shared quick variables/traces are created without any hidden Tk
+    # widgets. No old tool sections are constructed, packed or destroyed.
+    from .quick_state import initialize_quick_state
+    initialize_quick_state(app)
+    sections: dict[str, ttk.Frame] = {}
     sections["图片预处理(前置)"] = build_preprocess_menu(app, content)
     sections["一、版面参数"] = build_layout_menu(app, content)
     sections["二、显示设置"] = build_compact_display_menu(app, content)
     sections["三、共享 OCR 通道 / OCR画线"] = build_ocr_menu(app, content)
     sections["三之一、OCR画线设置"] = build_headword_profile_menu(app, content)
     sections["四、画线 / OCR / 插图 / 校对"] = build_drawing_menu(app, content)
+    sections["五、后期词典制作"] = build_postproduction_menu(app, content)
+    app.preprocess_panel = sections["图片预处理(前置)"]
     app.workspace_tools_sections = sections
     app.workspace_tools_scrollbar_refresh = refresh_scrollbar
     app.workspace_tools_content = content
@@ -1360,6 +1285,9 @@ def set_sidebar_mode(app: Any, mode: str) -> str:
     if mode not in {"极简", "紧凑", "正常", "最大"}:
         return "break"
     app.workspace_mode = mode
+    previews = app.__dict__.get("_page_thumbnails")
+    if previews is not None:
+        previews.on_mode_change()
     _refresh_window_mode_buttons(app)
     _apply_preset_page_index(app, mode)
     _apply_preset_rail_controls(app, mode)

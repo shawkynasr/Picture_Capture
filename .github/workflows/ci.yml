@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, audit/settings-contract-thresholds-help-scroll-20261015]
   pull_request:
-    branches: [main]
+    branches: [main, feat/integrated-ocr-runtime-monitor-20261014]
 
 permissions:
   contents: read
@@ -45,6 +45,13 @@ jobs:
             uv run --locked python scripts/change_architecture_guard.py
           fi
 
+      - name: Quality golden fixtures and benchmark provenance (no scan pixels)
+        run: >-
+          uv run --locked pytest -q
+          tests/test_headword_quality_golden_20261014.py
+          tests/test_b1_benchmark_provenance_20261014.py
+          tests/test_b1_merged_ocr_safety_20261014.py
+
       - name: Run pytest
         run: uv run --locked pytest
 
@@ -55,6 +62,22 @@ jobs:
       - name: GUI construction smoke (Windows/macOS)
         if: runner.os != 'Linux'
         run: uv run --locked python scripts/gui_smoke.py
+
+      - name: B2 proofreading evidence Tk integration (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a uv run --locked python scripts/gui_proofreading_evidence_smoke.py
+
+      - name: B2 proofreading evidence Tk integration (Windows/macOS)
+        if: runner.os != 'Linux'
+        run: uv run --locked python scripts/gui_proofreading_evidence_smoke.py
+
+      - name: R3 candidate deletion Tk transaction (Linux synthetic)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a uv run --locked python scripts/gui_r3_candidate_delete_smoke.py
+
+      - name: R3 candidate deletion Tk transaction (Windows/macOS synthetic)
+        if: runner.os != 'Linux'
+        run: uv run --locked python scripts/gui_r3_candidate_delete_smoke.py
 
       - name: Run compatibility test runner
         run: uv run --locked python run_tests.py
@@ -67,3 +90,20 @@ jobs:
 
       - name: Build wheel
         run: uv build --wheel
+
+
+  python310-compat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up uv and Python 3.10
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.10"
+          enable-cache: true
+      - name: Install locked dependencies
+        run: uv sync --locked --group dev
+      - name: Run Python 3.10 regression suite
+        run: uv run --locked pytest -q
+      - name: Compile Python sources on 3.10
+        run: uv run --locked python -m compileall -q src scripts run.py run_tests.py

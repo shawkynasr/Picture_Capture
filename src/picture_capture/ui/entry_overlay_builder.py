@@ -12,6 +12,8 @@ import tkinter as tk
 from ..models import Entry as WordEntry
 from ..processing import column_index, line_box
 from ..overlay_layout_helpers import (
+    canonical_headword_marker_span, effective_overlay_column_width,
+    horizontal_entry_editor_slot,
     effective_main_overlay_font_size, entry_index_label_layout,
     horizontal_ocr_menu_layout, horizontal_overlay_layout,
     scaled_overlay_line_width, transformed_entry_anchor,
@@ -21,6 +23,7 @@ from ..overlay_layout_helpers import (
 from ..overlay_opacity import create_alpha_canvas_line
 from ..review_text_helpers import _entry_font_spec
 from ..ui_compat import resolve_content_font_family
+from .overlay_delete_button import create_overlay_delete_button, fixed_overlay_control_font
 from .widgets.vertical_word import VerticalWordText
 
 
@@ -36,13 +39,33 @@ def draw_entry_overlay(
     entry_u, entry_v = geometry.source_to_canonical(entry.x, entry.y)
     col = column_index(entry.x, geometry, entry.y)
     canonical_x = geometry.x_at(col, entry_v)
-    width = geometry.column_widths[col] * self.view_scale
+    column_width = effective_overlay_column_width(
+        geometry, col, self.settings.column_width,
+    )
     record = {"widgets": [], "canvas_items": [], "index_widget": None}
+    marker_left, marker_right = canonical_headword_marker_span(
+        canonical_x, column_width, self.settings.right_ratio,
+    )
     marker_start, marker_end = geometry.transform.canonical_marker_to_source(
-        (canonical_x, entry_v),
-        (canonical_x + round(geometry.column_widths[col] * 0.95), entry_v),
+        (marker_left, entry_v), (marker_right, entry_v),
         geometry.source_size,
     )
+    column_end_source_x, _column_end_source_y = (
+        geometry.transform.canonical_to_source_point(
+            round(canonical_x + column_width),
+            round(entry_v), geometry.source_size,
+        )
+    )
+    column_end_screen_x = float(column_end_source_x) * self.view_scale
+    # Controls are positioned from the *painted* marker endpoint, not
+    # the full column edge; right_ratio may be less than 100%.
+    marker_right_screen_x = max(
+        float(marker_start[0]), float(marker_end[0]),
+    ) * self.view_scale
+    marker_right_screen_y = (
+        float(marker_start[1]) if marker_start[0] >= marker_end[0]
+        else float(marker_end[1])
+    ) * self.view_scale
 
     marker_line_width = scaled_overlay_line_width(self.settings.marker_height, overlay_scale)
     show_markers = (
@@ -65,18 +88,45 @@ def draw_entry_overlay(
         )
         record["canvas_items"].append(item)
 
+    horizontal = self.settings.layout_writing_mode == "horizontal-tb"
+    vertical = not horizontal
+    rtl = horizontal and self.settings.layout_text_direction == "rtl"
+
+    # [X] belongs to the visible separator, not to the editable headword
+    # label. Instantiate it before the label visibility gate so it is also
+    # available when users hide all text editors and sequence numbers.
+    delete_button = None
+    delete_req_width = 0
+    if show_markers:
+        delete_button = create_overlay_delete_button(
+            self.canvas,
+            command=lambda e=entry: self.delete_entry(e),
+            attach_tooltip=self._attach_tooltip,
+            tooltip="点击删除该画线!",
+            ocr_language=self.settings.ocr_language,
+            kind="entry",
+        )
+        if processing_readonly:
+            delete_button.configure(state="disabled")
+        self.overlay_widgets.append(delete_button)
+        record["widgets"].append(delete_button)
+        record["delete_widget"] = delete_button
+        delete_req_width = max(1, delete_button.winfo_reqwidth())
+
     if not getattr(self.settings, "show_main_entry_labels", True):
-        # Keep the headword separator visible while hiding the editable
-        # text box, sequence number, OCR menu and delete button.
+        # Suppress editor, sequence and OCR widgets only. Keep a visible,
+        # actionable [X] attached to the marker at the column's far edge.
+        if delete_button is not None:
+            record["canvas_items"].append(self.canvas.create_window(
+                marker_right_screen_x, marker_right_screen_y,
+                window=delete_button, anchor="ne",
+            ))
         self._entry_visuals[id(entry)] = record
         return
 
     editor_font_size = effective_main_overlay_font_size(
         self.image.width, self.view_scale, self.settings,
     )
-    horizontal = self.settings.layout_writing_mode == "horizontal-tb"
-    vertical = not horizontal
-    rtl = horizontal and self.settings.layout_text_direction == "rtl"
     main_family = resolve_content_font_family(
         self.canvas,
         self.settings.main_entry_font_family,
@@ -134,7 +184,8 @@ def draw_entry_overlay(
     editor.bind("<Shift-Tab>", lambda e: self.focus_previous(e.widget))
     editor.bind("<Down>", lambda e: self.focus_next(e.widget))
     editor.bind("<Up>", lambda e: self.focus_previous(e.widget))
-    editor.bind("<Delete>", lambda _e, e=entry: self.delete_entry(e))
+    # Tk Entry keeps its native <Delete> binding: remove a character/selection,
+    # never the entire PDIC entry or its separator. [X] owns entry deletion.
     editor.bind("<KeyPress-grave>", lambda _e, e=entry: self.delete_entry(e))
     self.overlay_widgets.append(editor)
     record["widgets"].append(editor)
@@ -147,16 +198,21 @@ def draw_entry_overlay(
     if horizontal:
         (editor_x, editor_y), editor_anchor, horizontal_index, horizontal_index_anchor = (
             horizontal_overlay_layout(
-                geometry.transform, canonical_x, entry_v, geometry.column_widths[col],
+                geometry.transform, canonical_x, entry_v, column_width,
                 float(self.settings.main_entry_x_ratio), geometry.source_size,
                 self.view_scale, rtl=rtl,
             )
+        )
+        # Canvas editor width uses the visible distance to the column end
+        # minus the actual [X] control width, if the marker is displayed.
+        editor_req_width, _delete_x, _delete_anchor = horizontal_entry_editor_slot(
+            editor_x, column_end_screen_x, delete_req_width, rtl=rtl,
         )
     else:
         # Match horizontal semantics: apply main_entry_x_ratio within the
         # 当前栏 first, then transform that point to source space.
         editor_x, editor_y = transformed_entry_anchor(
-            geometry.transform, canonical_x, entry_v, geometry.column_widths[col],
+            geometry.transform, canonical_x, entry_v, column_width,
             float(self.settings.main_entry_x_ratio), geometry.source_size, self.view_scale,
         )
     
@@ -197,10 +253,14 @@ def draw_entry_overlay(
             editor_x, editor_y,
             window=editor,
             anchor=editor_anchor,
+            width=editor_req_width,
         )
         record["canvas_items"].append(item)
 
     candidate = self._candidate_for_entry(entry)
+    # OCR-line candidate acceptance/rejection is a separate workflow owned
+    # by the detection review layer.  Do not misrepresent an existing PDIC
+    # entry as a selectable (or disabled) detection candidate.
     ocr_menu = (
         self._create_main_ocr_menu(entry, editor, candidate)
         if self._main_ocr_review_option_enabled("review_main_show_ocr_choices")
@@ -217,18 +277,28 @@ def draw_entry_overlay(
         menu_req_width = max(1, ocr_menu.winfo_reqwidth())
 
         if vertical and vertical_box:
-            ocr_x, ocr_y, ocr_anchor = vertical_ocr_menu_layout(
-                vertical_box, menu_req_width,
-                self.settings.layout_writing_mode, size[0],
-            )
+            if delete_button is not None and self.settings.layout_writing_mode == "vertical-lr":
+                # [X] sits to the right of the vertical editor; the optional
+                # OCR selector moves below rather than covering that action.
+                ocr_x, ocr_y, ocr_anchor = (
+                    float(vertical_box[0]), float(vertical_box[3] + 2), "nw",
+                )
+            else:
+                ocr_x, ocr_y, ocr_anchor = vertical_ocr_menu_layout(
+                    vertical_box, menu_req_width,
+                    self.settings.layout_writing_mode, size[0],
+                )
         else:
-            ocr_x, ocr_y, ocr_anchor = horizontal_ocr_menu_layout(
-                editor_x, editor_y, editor_req_width, rtl=rtl,
+            # No false "candidate" checkbox for an already-saved Entry.
+            # A genuine OCR-line candidate reviewer can reserve its own
+            # approved slot in its own rendering layer; this OCR text menu
+            # begins directly at the visible marker right endpoint.
+            ocr_x = marker_right_screen_x
+            ocr_y = marker_right_screen_y + (
+                max(1, delete_button.winfo_reqheight()) + 2
+                if delete_button is not None else 2
             )
-            if not rtl and ocr_x + menu_req_width > size[0] - 2:
-                ocr_x = max(0, size[0] - menu_req_width - 2)
-            elif rtl and ocr_x - menu_req_width < 2:
-                ocr_x = menu_req_width + 2
+            ocr_anchor = "nw"
 
         item = self.canvas.create_window(
             ocr_x,
@@ -258,13 +328,26 @@ def draw_entry_overlay(
         bd=0,
         padx=2,
         pady=0,
-        font=_entry_font_spec(
-            main_family, max(8, round(editor_font_size * 0.65)), False, False,
+        font=fixed_overlay_control_font(
+            self.canvas, self.settings.ocr_language,
         ),
     )
     # Sequence numbers intentionally use a neutral light-gray control style;
     # the delete control remains red to preserve its destructive meaning.
     index_label._pc_skip_classic_appearance = True
+    # B2: index widget owns a concrete Entry object, never a sorted-row index.
+    # Right click gives an explicit original-image XY relocation action.
+    # No ordinary left-click/canvas draw or text-editor gesture is changed.
+    index_label.bind(
+        "<Button-3>",
+        lambda _event, e=entry: self._move_entry_via_dialog(e),
+    )
+    index_label.bind(
+        "<Control-Button-1>",
+        lambda _event, e=entry: self._move_entry_via_dialog(e),
+    )
+    self._attach_tooltip(index_label, "右键序号：按原图 X,Y 移动画线（一次一个）")
+
     self.overlay_widgets.append(index_label)
     record["widgets"].append(index_label)
     record["index_widget"] = index_label
@@ -273,44 +356,25 @@ def draw_entry_overlay(
     )
     record["canvas_items"].append(index_window)
 
-    index_width = max(1, index_label.winfo_reqwidth())
-    index_height = max(1, index_label.winfo_reqheight())
-    if horizontal:
-        delete_x = float(index_x - index_width - 1) if index_anchor == "ne" else float(index_x - 1)
-        delete_y = float(index_y)
-        delete_anchor = "ne"
-    else:
-        delete_x = float(index_x - index_width / 2.0 - 1)
-        delete_y = float(index_y - index_height / 2.0)
-        delete_anchor = "e"
-    delete_button = tk.Button(
-        self.canvas,
-        text="[X]",
-        width=3,
-        takefocus=False,
-        relief="flat",
-        bd=0,
-        highlightthickness=0,
-        padx=1,
-        pady=0,
-        cursor="hand2",
-        fg="#ffffff",
-        bg="#9d042f",
-        activeforeground="#ffffff",
-        activebackground="#9d042f",
-        command=lambda e=entry: self.delete_entry(e),
-    )
-    delete_button._pc_skip_classic_appearance = True
-    if processing_readonly:
-        delete_button.configure(state="disabled")
-    self._attach_tooltip(delete_button, "点击删除该画线!")
-    self.overlay_widgets.append(delete_button)
-    record["widgets"].append(delete_button)
-    record["delete_widget"] = delete_button
-    delete_window = self.canvas.create_window(
-        delete_x, delete_y, window=delete_button, anchor=delete_anchor,
-    )
-    record["canvas_items"].append(delete_window)
+    if delete_button is not None:
+        if horizontal:
+            # The button's RIGHT edge remains aligned with the painted
+            # marker endpoint; editor width is reserved independently.
+            delete_x = marker_right_screen_x
+            delete_y = marker_right_screen_y
+            delete_anchor = "ne"
+        else:
+            # For vertical text there is no horizontal trailing word box;
+            # use the physical right edge of its actual vertical widget.
+            delete_x = float(min(
+                max(0, size[0] - delete_req_width),
+                vertical_box[2] + 2 if vertical_box else column_end_screen_x,
+            ))
+            delete_y = float(editor_y)
+            delete_anchor = "nw"
+        record["canvas_items"].append(self.canvas.create_window(
+            delete_x, delete_y, window=delete_button, anchor=delete_anchor,
+        ))
 
     if self.crop_preview_var.get():
         left, top, right, bottom = line_box(entry, geometry, self.image, self.settings)

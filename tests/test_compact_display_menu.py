@@ -42,11 +42,11 @@ def test_display_controls_are_in_requested_order_and_share_existing_variables():
     source = (ROOT / "ui" / "compact_display_menu.py").read_text(encoding="utf-8")
     captions = (
         "自动保存", "隐藏线框（插图除外）", "显示标尺", "显示区块",
-        "栏左垂线", "词头横线", "插图形状:线",
-        "插图标签:线", "词头标签", "显示OCR内容选择器",
+        "栏左垂线", "词头横线", "词头标签",
+        "插图形状:线", "插图标签:线", "显示OCR内容选择器",
         "显示OCR对比底色结果", "显示单行画线候选框",
-        "颜色模式", "显示模式", "向右比例%", "显示Layout",
-        "去噪强度", "切图预览标签:",
+        "颜色模式", "显示模式", "向右比例%", "切图预览标签:",
+        "显示Layout",
     )
     starts = [source.index('"' + caption + '"') for caption in captions]
     assert starts == sorted(starts)
@@ -127,30 +127,30 @@ def test_all_compact_task_menus_share_regular_row_spacing_and_label_alignment():
     assert "ACTION_GROUPS" in task
 
 
-def test_legacy_postproduction_menu_reflow_has_matching_spacing():
-    text = Path(workspace_tools.__file__).read_text(encoding="utf-8")
-    reflow = text.split("def _stack_tool_menu_controls(", 1)[1].split(
-        "def _draw_rail_icon(", 1
-    )[0]
-    assert 'padx=(3, 3), pady=(2, 2)' in reflow
-    assert 'container.columnconfigure(0, weight=1)' in reflow
-    assert 'child.grid(' in reflow and 'child.pack(' in reflow
-    # Postproduction stays the one legacy panel and keeps its original actions.
-    assert 'sections["五、后期词典制作"]' not in text
-    assert 'app._build_quick_settings(content)' in text
+def test_postproduction_is_rebuilt_as_compact_menu_and_legacy_reflow_removed():
+    tools = Path(workspace_tools.__file__).read_text(encoding="utf-8")
+    task = (ROOT / "ui" / "compact_task_menus.py").read_text(encoding="utf-8")
+    assert 'sections["五、后期词典制作"] = build_postproduction_menu(app, content)' in tools
+    assert 'initialize_quick_state(app)' in tools  # Pure Tk vars/traces bootstrap.
+    assert "_stack_tool_menu_controls" not in tools
+    assert "retire_superseded_quick_panels" not in tools
+    for name in ("画线行导出", "未画线行导出", "词条切图", "插图切图",
+                 "项目详情", "导出PicDic索引", "PicDic制作", "导出训练标记包"):
+        assert f'"{name}"' in task
+    assert "app._pc_single_line_crop_button = button" in task
+    assert "app._pc_unlined_export_button = button" in task
 
 
 def test_display_integer_field_casts_and_loaded_value_formatting():
-    app_source = (ROOT / "app.py").read_text(encoding="utf-8")
-    opacity = (ROOT / "overlay_opacity.py").read_text(encoding="utf-8")
-    fill = (ROOT / "illustration_fill_opacity.py").read_text(encoding="utf-8")
-    assert 'self.quick_field_casts["batch_interval"] = int' in app_source
-    assert 'self.quick_field_casts["right_ratio"] = float' in app_source
-    assert 'self.quick_field_casts[name] = int  # Both width and displayed offset%' in app_source
-    assert '"batch_interval", "guide_opacity", "headword_marker_opacity",' in app_source
-    assert 'value = round(float(value) * 100)' in app_source
-    assert 'value = float(value) / 100.0' in app_source
-    assert 'app.quick_field_casts[name] = int' in opacity
-    assert 'app.quick_field_casts[name] = int' in fill
-    assert 'rendered = str(round(current))' in opacity
-    assert 'tk.StringVar(value=str(round(current)))' in fill
+    from picture_capture.ui.quick_state import QUICK_FIELD_TYPES, _initial_field_text
+    from picture_capture.models import AppSettings
+
+    assert QUICK_FIELD_TYPES["batch_interval"] is int
+    assert QUICK_FIELD_TYPES["right_ratio"] is float
+    assert QUICK_FIELD_TYPES["main_entry_x_ratio"] is int
+    assert QUICK_FIELD_TYPES["guide_opacity"] is int
+    assert _initial_field_text(AppSettings(main_entry_x_ratio=0.43),
+                               "main_entry_x_ratio") == "43"
+    assert _initial_field_text(AppSettings(batch_interval=12.5),
+                               "batch_interval") == "12"
+

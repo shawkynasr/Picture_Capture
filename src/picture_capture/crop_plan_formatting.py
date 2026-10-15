@@ -30,9 +30,30 @@ def _normalized_crop_name(text: str) -> str:
 def polygon_display_name(region: PolygonRegion, index: int) -> str:
     label = str(region.label or "").strip()
     fields = label.split("|")
+    # New canonical PPP labels start with P_nn|page|entry_id. Legacy
+    # page|P_nn|... remains supported for historical crop manifests.
+    if len(fields) >= 3 and fields[0].startswith("P_"):
+        return fields[0]
     if len(fields) >= 3 and fields[1].strip():
         return fields[1].strip()
     return label or f"P_{index + 1:02d}"
+
+
+def canonical_polygon_link(region: PolygonRegion) -> tuple[str, int | None] | None:
+    """Decode the *saved* P_nn|source_page|zero_based_entry_id[|AUTO_nn].
+
+    The first field is the figure's number, NEVER the word's name or ID.
+    'xxx' is an explicitly unlinked figure. An absent canonical pattern is
+    legacy PPP and can still use the old exact-headword association path.
+    """
+    match = re.fullmatch(
+        r"P_\d+\|([^|]+)\|(xxx|\d{3})(?:\|AUTO_\d+)?",
+        str(region.label or "").strip(), flags=re.I,
+    )
+    if match is None:
+        return None
+    token = match.group(2).lower()
+    return (match.group(1), None if token == "xxx" else int(token))
 
 
 def page_crop_plan_dict(plan: PageCropPlan) -> dict:
