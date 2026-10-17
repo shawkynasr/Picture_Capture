@@ -1184,7 +1184,7 @@ def test_settings_center_uses_context_help_units_and_user_facing_modes():
         "column_track_radius", "column_track_block_height", "column_track_max_step",
         "paddle_band_width_ratio", "paddle_left_tolerance",
         "paddle_separator_roi_width_ratio", "paddle_header_search_height",
-        "right_ratio", "review_zoom_percent",
+        "right_ratio", "crop_width_percent", "review_zoom_percent",
     )
     for name in percent_float_fields:
         assert f'"{name}", float' in schema, name
@@ -1273,7 +1273,7 @@ def test_settings_center_uses_native_compact_right_pane_help():
     source = root / "src" / "picture_capture" / "app.py"
     text = source.read_text(encoding="utf-8")
     helper_source = (
-        root / "src" / "picture_capture" / "layout_percent_helpers.py"
+        root / "src" / "picture_capture" / "geometry" / "layout_percent_helpers.py"
     ).read_text(encoding="utf-8")
     settings_start = text.index("class SettingsDialog")
     settings_end = text.index("class ", settings_start + len("class SettingsDialog"))
@@ -2261,7 +2261,7 @@ def test_layout_percentage_helpers_preserve_pixel_backend_contract():
     source = root / "src" / "picture_capture" / "app.py"
     text = source.read_text(encoding="utf-8")
     helper_source = (
-        root / "src" / "picture_capture" / "layout_percent_helpers.py"
+        root / "src" / "picture_capture" / "geometry" / "layout_percent_helpers.py"
     ).read_text(encoding="utf-8")
     schema = (root / "src" / "picture_capture" / "ui" / "settings" / "schema.py").read_text(encoding="utf-8")
     assert '"start_y": "height"' in helper_source
@@ -3403,7 +3403,7 @@ def test_ordinary_only_controls_stay_out_of_main_layout_section():
     normal_checks_end = schema.index("OCR_COMMON_CHECKS = (", normal_checks_start)
     normal_checks = schema[normal_checks_start:normal_checks_end]
     assert '("自动精修横线 Y", "paddle_refine_separator_y")' not in normal_checks
-    assert '("自动精修横线 Y（普通画线与 OCR 共用）", "paddle_refine_separator_y")' in schema
+    assert '("自动画线 Y 精修（手动按钮独立）", "paddle_refine_separator_y")' in schema
     assert '("使用自动版面参数", "ordinary_auto_layout")' in normal_checks
 
     # Ordinary-only controls belong in Settings Center, not the compact
@@ -3596,6 +3596,7 @@ def test_restored_vb_controls_are_exposed_separately_from_modern_right_ratio():
         / "src" / "picture_capture" / "ui" / "settings" / "schema.py"
     ).read_text(encoding="utf-8")
     assert '("向右比例 %", "right_ratio", float)' in schema_source
+    assert '("切图宽度(%栏)", "crop_width_percent", float)' in schema_source
     assert '("VB 向右比例 1/x", "ordinary_right_divisor", float)' in schema_source
     for name in (
         "white_threshold_high", "white_threshold_low", "whitespace_adjustment",

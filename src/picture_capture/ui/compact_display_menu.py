@@ -92,7 +92,7 @@ def build_compact_display_menu(app: Any, parent: tk.Misc) -> ttk.Frame:
         ttk.Separator(panel, orient="horizontal").pack(fill="x", pady=(7, 6))
 
     def family(row: ttk.Frame, name: str) -> ttk.Combobox:
-        families = ("自动（系统推荐）", *tuple(sorted(set(font.families()), key=str.casefold)))
+        families = ("自动（系统推荐）", *tuple(sorted((f for f in font.families() if not f.startswith("@")), key=str.casefold)))
         combo = ttk.Combobox(
             row, textvariable=qv[name], values=families, state="normal",
             style="PC.Display.TCombobox",
@@ -214,8 +214,8 @@ def build_compact_display_menu(app: Any, parent: tk.Misc) -> ttk.Frame:
 
     divider()
 
-    # Group 5: appearance and exclusive display mode. Keep right-ratio directly
-    # below display mode while preserving the pre-existing quick variable.
+    # Group 5: appearance and exclusive display mode. Keep the independent
+    # marker/auxiliary-line width here, not the PNG cropping width.
     dropdown("颜色模式", app.appearance_mode_var,
              ("浅色", "深色", "跟随系统"), app._appearance_mode_selected)
     dropdown("显示模式", app.display_mode_var, DISPLAY_MODES, app._apply_display_mode)
@@ -224,7 +224,7 @@ def build_compact_display_menu(app: Any, parent: tk.Misc) -> ttk.Frame:
 
     divider()
 
-    # Crop-preview label controls immediately below the rightward ratio.
+    # Crop-preview label appearance is independent of crop geometry.
     row = line()
     label(row, "切图预览标签:")
     font_style(row, "crop_preview_font_size",

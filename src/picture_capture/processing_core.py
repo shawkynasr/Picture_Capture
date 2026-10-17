@@ -1818,7 +1818,7 @@ def _fuse_detection_entries(
             delta = abs(int(ocr_v) - int(ordinary_v))
             if delta <= tolerance:
                 pair_edges.append((delta, ordinary_index, ocr_index))
-    from .ordered_marker_matching import match_ordered_markers
+    from .quality.ordered_marker_matching import match_ordered_markers
 
     matched_ocr = match_ordered_markers(
         len(ordinary_rows), len(ocr_rows), pair_edges,
@@ -2143,53 +2143,105 @@ def refine_existing_entries(
     settings: AppSettings,
     *,
     profile_page_index: int = 0,
+    source_image_path: Path | None = None,
+    fixed_half_gutter: bool = False,
 ) -> tuple[list[Entry], dict[str, int]]:
-    """Refine only existing marker positions without adding or removing rows.
+    """Refine saved Y while preserving entry identity and text."""
+    if source_image_path is None:
+        source, effective, analysis_source, geometry = _page_geometry_context(
+            image, settings, profile_page_index,
+        )
+        return _refine_existing_entries_with_geometry(
+            entries, effective, analysis_source, geometry,
+        )
 
-    The current PDIC markers are treated as the coarse localization.  The same
-    local ink-valley refiner used by automatic drawing is called again in
-    canonical layout space.  Each marker is constrained to the refiner's own
-    local search radius, which acts as a hard safety bound on canonical Y
-    movement.  Entry text/order/count and every non-coordinate field are kept.
-    """
-    source, effective, analysis_source, geometry = _page_geometry_context(
-        image, settings, profile_page_index,
+    from .marker_refinement_analysis import prepare_refinement_analysis
+
+    prep_kwargs = {"fixed_half_gutter": True} if fixed_half_gutter else {}
+    source, effective, analysis_source = prepare_refinement_analysis(
+        image, settings, profile_page_index, source_image_path=source_image_path,
+        **prep_kwargs,
     )
+    try:
+        geometry = derive_geometry(analysis_source, effective)
+        return _refine_existing_entries_with_geometry(
+            entries, effective, analysis_source, geometry,
+            align_to_ink_top=True, fixed_half_gutter=fixed_half_gutter,
+        )
+    finally:
+        analysis_source.close()
+        source.close()
+
+
+def _refine_existing_entries_with_geometry(
+    entries: list[Entry],
+    effective: AppSettings,
+    analysis_source: Image.Image,
+    geometry: Geometry,
+    *,
+    align_to_ink_top: bool = False,
+    fixed_half_gutter: bool = False,
+) -> tuple[list[Entry], dict[str, int]]:
+    """Refine Y without reclassifying Layout rows."""
     canonical = geometry.transform.canonical_image_for_analysis(analysis_source)
     gray = np.asarray(ImageOps.grayscale(canonical), dtype=np.uint8)
 
-    from .paddle_headwords import refine_separator_y
+    if align_to_ink_top:
+        from .marker_refinement_top_edge import refine_existing_marker_to_ink_top
+    else:
+        from .paddle_headwords import refine_separator_y
 
-    canonical_width = canonical.width
     line_height = max(
         2,
         _source_px(effective.character_height),
     )
     source_pixel_scale = 1.0
     search_ratio = max(0.05, min(0.80, float(effective.paddle_separator_search_ratio)))
-    max_delta = max(2, round(line_height * search_ratio))
+    max_delta = (
+        max(0, round(line_height * max(0.0, min(1.5, float(effective.separator_y_max_shift_ratio)))))
+        if align_to_ink_top
+        else max(2, round(line_height * search_ratio))
+    )
 
     refined_entries: list[Entry] = []
     moved = 0
     limited = 0
+    unverified = 0
     for entry in entries:
         canonical_u, canonical_v = geometry.source_to_canonical(entry.x, entry.y)
         col = column_index(entry.x, geometry, entry.y)
         column_x = max(0, round(geometry.x_at(col, canonical_v)))
         column_right = min(
             gray.shape[1],
-            column_x + max(10, int(geometry.column_widths[col])),
+            column_x + max(10, min(int(geometry.column_widths[col]), int(effective.column_width))),
         )
+        if fixed_half_gutter:
+            from .marker_refinement_fixed_band import fixed_half_gutter_band
+            column_x, column_right = fixed_half_gutter_band(
+                geometry, col, int(canonical_v), gray.shape[1],
+                int(effective.column_width), int(effective.gutter),
+            )
         new_v = int(canonical_v)
         if column_right > column_x:
-            candidate_v, _details = refine_separator_y(
-                gray[:, column_x:column_right],
-                int(canonical_v),
-                line_height,
-                effective,
-                pixel_scale=source_pixel_scale,
-                lower_bound=max(0, int(geometry.top)),
-            )
+            if align_to_ink_top:
+                candidate_v, _details = refine_existing_marker_to_ink_top(
+                    gray, int(canonical_v), line_height, effective,
+                    anchor_x=int(canonical_u),
+                    column_left=column_x, column_right=column_right,
+                    lower_bound=max(0, int(geometry.top)),
+                    upper_bound=int(geometry.bottom),
+                )
+                if _details.get("reason") != "verified_whole_column_blank":
+                    unverified += 1
+            else:
+                candidate_v, _details = refine_separator_y(
+                    gray[:, column_x:column_right],
+                    int(canonical_v),
+                    line_height,
+                    effective,
+                    pixel_scale=source_pixel_scale,
+                    lower_bound=max(0, int(geometry.top)),
+                )
             delta = int(candidate_v) - int(canonical_v)
             if abs(delta) > max_delta:
                 limited += 1
@@ -2206,6 +2258,7 @@ def refine_existing_entries(
         "moved": moved,
         "limited": limited,
         "max_delta": int(max_delta),
+        "unverified": unverified,
     }
 
 
@@ -2371,7 +2424,7 @@ def line_box(entry: Entry, geometry: Geometry, image: Image.Image, settings: App
     character_height = _source_px(settings.character_height)
     vertical_pad = abs(row_padding)
     height = character_height + 2 * abs(row_padding)
-    width = round(geometry.column_widths[idx] * min(100.0, max(1.0, settings.right_ratio)) / 100.0)
+    width = round(geometry.column_widths[idx] * min(100.0, max(1.0, settings.crop_width_percent)) / 100.0)
     left_extension = round(geometry.column_starts[0] * 0.5)
     tracked_x = geometry.x_at(idx, entry_v)
     canonical_box = (
@@ -2769,12 +2822,15 @@ def _stage_crop(
 def split_single_lines(
     image_path: Path, entries: list[Entry], settings: AppSettings, output_dir: Path,
     *, profile_page_index: int = 0, page_sections: list[PageSection] | None = None,
+    write_manifest: bool = True,
 ) -> list[CropRecord]:
     with Image.open(image_path) as opened:
         image = normalize_page_rgb(opened)
     source, effective, _analysis_source, geometry = _page_geometry_context(
         image, settings, profile_page_index,
     )
+    from .marker_refinement_analysis import whiten_illustrations_for_export as whiten
+    source = whiten(source, effective, profile_page_index, source_image_path=image_path)
     if page_sections is None:
         page_sections = read_page_sections(image_path)
     records: list[CropRecord] = []
@@ -2793,13 +2849,20 @@ def split_single_lines(
             records.append(CropRecord(image_path.name, index, entry.word, filename, box))
             manifest.append(filename)
         manifest_target = output_dir / f"{image_path.stem}.PSWords"
-        manifest_temp = _stage_text_file(
-            manifest_target, "\n".join(manifest) + ("\n" if manifest else ""),
-        )
-        staged.append(manifest_temp)
-        replacements.append((manifest_temp, manifest_target))
+        if write_manifest:
+            manifest_temp = _stage_text_file(
+                manifest_target, "\n".join(manifest) + ("\n" if manifest else ""),
+            )
+            staged.append(manifest_temp)
+            replacements.append((manifest_temp, manifest_target))
         stale = list(output_dir.glob(f"{image_path.stem}_SW_*.png"))
-        _publish_file_transaction(replacements, stale_paths=stale)
+        if not write_manifest:
+            stale.append(manifest_target)
+        if replacements:
+            _publish_file_transaction(replacements, stale_paths=stale)
+        else:
+            for path in stale:
+                path.unlink(missing_ok=True)
     except Exception:
         for temp in staged:
             temp.unlink(missing_ok=True)

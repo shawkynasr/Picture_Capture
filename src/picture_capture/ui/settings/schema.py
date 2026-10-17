@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .refinement_settings_help import REFINEMENT_SETTING_HELP, REFINEMENT_CHECK_HELP
+
 """Static Settings Center metadata.
 
 The dialog keeps compatibility class attributes that reference these exact
@@ -21,6 +23,7 @@ FIELDS = [
         ("正文结束 Y", "bottom_y", int), ("首栏 X", "manual_x", float),
         ("正文缩进", "body_indent", float), ("单行字高", "character_height", float),
         ("行间空白", "row_padding", float), ("向右比例 %", "right_ratio", float),
+        ("切图宽度(%栏)", "crop_width_percent", float),
         ("VB 向右比例 1/x", "ordinary_right_divisor", float),
         ("物理行墨迹投影采样宽度（%栏宽）", "physical_row_projection_width_percent", float),
         ("微调判距", "horizontal_tolerance", float), ("标记线高", "marker_height", int),
@@ -53,6 +56,23 @@ FIELDS = [
         ("插图标签背景色", "illustration_label_fill_color", str),
         ("插图标签字体", "illustration_label_font_family", str),
         ("插图标签字号", "illustration_label_font_size", int),
+        ("REF 未填写底色（淡橙）", "ref_box_fill_color", str),
+        ("REF 未填写底色不透明度 %", "ref_box_fill_opacity", float),
+        ("REF 已填写底色（淡绿）", "ref_box_filled_color", str),
+        ("REF 已填写底色不透明度 %", "ref_box_filled_opacity", float),
+        ("REF 文本标签文字颜色", "ref_box_text_color", str),
+        ("REF 文本标签字体", "ref_box_font_family", str),
+        ("REF 文本标签字号", "ref_box_font_size", int),
+        ("REF ×／编辑按钮位置", "ref_box_action_position", str),
+        ("REF 文本标签底色", "ref_text_label_background_color", str),
+        ("REF 文本标签底色不透明度 %", "ref_text_label_background_opacity", float),
+        ("REF 文本标签与原图框距离 px", "ref_text_label_gap", int),
+        ("REF 文本标签内边距 px", "ref_text_label_padding", int),
+        ("OCR REF 提取正则", "ref_ocr_extract_regex", str),
+        ("REF 默认宽度（行高倍数）", "ref_box_width_lines", float),
+        ("REF 默认高度（行高倍数）", "ref_box_height_lines", float),
+        ("REF 样本最低匹配分 0.60–0.999", "ref_match_threshold", float),
+        ("REF 样本跨页缩放容差 ±%", "ref_match_scale_tolerance_percent", float),
         ("OCR 语言", "ocr_language", str),
         ("Tesseract 语言", "tesseract_language", str),
         ("书写模式", "layout_writing_mode", str),
@@ -81,12 +101,12 @@ FIELDS = [
         ("AI 页眉横线墨迹比例", "paddle_header_rule_ink_ratio", float),
         ("AI 页眉横线后余量", "paddle_header_rule_margin", int),
         ("AI 词性搜索字符数", "paddle_pos_search_chars", int),
-        ("横线Y精修搜索范围（行高比）", "paddle_separator_search_ratio", float),
-        ("横线Y精修安全带半径（px）", "paddle_separator_band_radius", int),
-        ("横线Y精修安全空间（px）", "paddle_separator_safety_px", int),
-        ("横线Y精修横向分析范围（%）", "paddle_separator_roi_width_ratio", float),
+        ("横线搜索半径（行高比）", "paddle_separator_search_ratio", float),
+        ("墨迹平滑／笔画小断点（px）", "paddle_separator_band_radius", int),
+        ("精修上缘最小留白（px）", "paddle_separator_safety_px", int),
+        ("横线横向取样比例（% 单栏）", "paddle_separator_roi_width_ratio", float),
         ("横线Y精修栏边余量（px）", "paddle_separator_column_margin", int),
-        ("Y 精修最大位移（行高比）", "separator_y_max_shift_ratio", float),
+        ("精修硬性最大位移（行高比）", "separator_y_max_shift_ratio", float),
         ("原图白缝核验最大偏移（行高比）", "separator_y_ink_safe_max_fraction", float),
         ("原图白缝核验墨迹灰度阈值", "separator_y_ink_safe_ink_threshold", int),
         ("原横线允许墨迹比例", "separator_y_ink_safe_existing_ink_ratio", float),
@@ -142,10 +162,10 @@ PROFILE_CHECKS = [
 FIELD_GROUPS = [
         ("版面几何", [
             "gutter", "column_width", "start_y", "manual_x",
-            "body_indent", "character_height", "row_padding", "right_ratio",
+            "body_indent", "character_height", "row_padding", "crop_width_percent",
             "horizontal_tolerance", "darkness_threshold",
         ]),
-        ("词条线显示", ["marker_height", "headword_marker_opacity", "guide_width", "guide_opacity"]),
+        ("词条线显示", ["right_ratio", "marker_height", "headword_marker_opacity", "guide_width", "guide_opacity"]),
         ("主界面词条文本框", [
             "main_entry_font_family", "main_entry_font_size", "main_entry_width_chars", "main_entry_x_ratio",
         ]),
@@ -255,17 +275,17 @@ SETTING_LABELS = {
         "paddle_left_tolerance": "词头左缘容差",
         "paddle_rec_score_threshold": "OCR 片段最低置信度",
         "paddle_min_candidate_score": "词头候选最低分",
-        "paddle_separator_safety_px": "横线与文字安全距离",
+        "paddle_separator_safety_px": "手动精修距首行文字上缘的间距",
         "paddle_line_merge_y_ratio": "同行碎片合并容差",
         "paddle_height_ratio": "字高提示阈值",
         "paddle_boldness_ratio": "粗体提示阈值",
         "paddle_gap_ratio": "行前空白提示阈值",
         "paddle_pos_search_chars": "词性提示搜索范围",
-        "paddle_separator_search_ratio": "横线 Y 精修搜索范围",
-        "paddle_separator_band_radius": "横线空白带平滑半径",
-        "paddle_separator_roi_width_ratio": "横线精修横向范围",
-        "paddle_separator_column_margin": "横线精修栏边余量",
-        "separator_y_max_shift_ratio": "精修最大位移（行高比）",
+        "paddle_separator_search_ratio": "横线附近候选搜索半径",
+        "paddle_separator_band_radius": "自动空白谷平滑／手动断点桥接",
+        "paddle_separator_roi_width_ratio": "栏左墨迹取样比例",
+        "paddle_separator_column_margin": "栏左排除区域",
+        "separator_y_max_shift_ratio": "最大允许移动行高倍数",
         "separator_y_ink_safe_max_fraction": "原图白缝核验最大偏移（行高比）",
         "separator_y_ink_safe_ink_threshold": "原图白缝核验墨迹灰度阈值",
         "separator_y_ink_safe_existing_ink_ratio": "原横线允许墨迹比例",
@@ -287,6 +307,24 @@ SETTING_LABELS = {
     }
 
 SETTING_HELP = {
+    "ref_box_fill_color": "REF 原图框未填写文字时为淡橙色，默认透明度 0%，不遮挡原始扫描文字，方便直接核对。",
+    "ref_box_fill_opacity": "原图 REF 定位框未填写时的内部填色透明度，默认 0%，原图可直接看清；文字标签有独立底色。",
+    "ref_box_filled_color": "REF 已填写文字时原图框可用淡绿填色，默认内部透明，不遮盖原图印刷文字，右侧文本标签独立。",
+    "ref_box_filled_opacity": "原图 REF 定位框已填写时的内部填色透明度，默认 0%。文本标签具有自己的底色/不透明度参数。",
+    "ref_box_text_color": "REF 独立标签文字颜色默认深蓝；标签通常位于原图框右侧，空间不足时移到左侧，原图字形不受影响。",
+    "ref_box_font_family": "REF 识别文字标签使用系统与 OCR 语言推荐字体，也可以手动指定已安装字体；不会改变原图 REF 框。",
+    "ref_box_font_size": "REF 独立文本标签的基准字号，默认 16 号；与主词条文本框采用相同的跟随缩放/固定策略。",
+    "ref_text_label_background_color": "REF OCR 文本标签的独立底色，不覆盖原图里的印刷文字。默认淡蓝，可在选色按钮直接预览。",
+    "ref_text_label_background_opacity": "OCR 文本标签底色默认不透明度 95%，与原图 REF 框填色分别控制；不修改 OCR 识别内容。",
+    "ref_text_label_gap": "OCR 文本标签与 REF 原图定位框的间隔（显示像素），默认 6 px；页面右侧空间不足时自动移至左侧。",
+    "ref_text_label_padding": "OCR 标签内边距默认 4 px，越大留白越宽；仅影响显示，不改动 REF 框的坐标和文字内容。",
+    "ref_ocr_extract_regex": "REF OCR 的可编辑 Python 正则：优先使用第一个命中的捕获组，否则使用完整匹配。无匹配保留原文，人工文字不受影响；只对新执行的 OCR 生效。",
+    "ref_box_action_position": "REF 文本编辑 ✎ 与删除 × 的操作按钮可以放在框的上方靠右、上方靠左或右侧。位置受页面边界自动约束，避免按钮落在页面外；默认上方靠右。",
+    "ref_box_width_lines": "手动单击新建 REF 时的默认宽度（典型行高倍数），默认 2 倍。拖框绘制时使用实际拖出的宽度。",
+    "ref_box_height_lines": "手动单击新建 REF 时的默认高度（典型行高倍数），默认 1 倍。拖框绘制时使用实际拖出的高度。",
+    "ref_match_threshold": "识别 REF 时的图案匹配最低分，默认 0.88；阈值越高误检越少，但可能漏检印刷略有变化的引导词；匹配时使用灰度对比度归一化，自动生成的框位于引导词右方。",
+    "ref_box_include_guide_width": "关闭时仅在图样对应方向画出 REF 默认宽度；开启后还将实际匹配图样包含在定位框内，宽度相加。向前的样本同样适用。",
+    "ref_match_scale_tolerance_percent": "引导词图样跨页匹配默认尝试 ±25% 缩放，允许 0–50%；0 表示不缩放。范围较大可能增加运算量与误报。",
         "separator_y_ink_safe_max_fraction": "原图白缝核验允许搜索的最大位移（行高比），默认0.25，另有0.30倍行高的安全上限。仅在开启实验性白缝核验后生效。\n\n增大更易找到远处白缝，但可能跳到相邻行；减小更保守，也可能无法修复穿字。",
         "separator_y_ink_safe_ink_threshold": "原图白缝核验对灰度图计算墨迹比例时，低于此阈值（默认185）的像素视为墨迹。仅在实验性白缝核验开启后生效。\n\n增大将浅色笔画也视作墨迹，但过高可能把灰背景当作文字；减小可能漏掉浅印字形。",
         "separator_y_ink_safe_existing_ink_ratio": "已有横线位置的墨迹占比不超过此值时不移动；默认0.045（4.5%）。仅在实验性白缝核验开启后生效。\n\n降低会更积极调整轻微穿字的线；提高更保守，可能允许线穿过部分文字。",
@@ -295,13 +333,13 @@ SETTING_HELP = {
         "layout_mask_illustrations_use_existing": (
             "依赖【Layout 分析前白化插图】。勾选后只读取当前页 PPP 中已经保存的插图多边形，"
             "直接对白化分析副本进行处理，不运行插图自动识别，也不改写 PPP。"
-            "未勾选时由自动检测产生候选，并按原有安全阈值筛选。"
+            "未勾选时由自动检测产生候选，并按原有安全阈值筛选；【精修画线】、【画线行导出】和【未画线行导出】都不会把新候选写入 PPP。"
             "PPP 缺失时不应默默改为重新检测或认为本页没有插图。"
         ),
         "layout_mask_illustrations": (
             "作用：开启后，【普通画线】和【显示 Layout】在 Page Understanding 之前先复用自动插图检测，"
             "把足够大的插图区域仅在分析副本上填成白色，再恢复文字行、缩进和 entry/body 角色。"
-            "原始扫描图、OCR、PDIC 与切图文件都不会被修改；若不勾选复用，自动识别的插图候选会写入 PPP（保留手工区域）。\n\n"
+            "原始扫描图、OCR 和 PDIC 不会被修改；普通 Layout 在非复用模式可能持久化 PPP 候选。【精修画线】仅填白分析副本；【画线行导出】及【未画线行导出】按同一规则处理临时图片并写入新导出的 PNG，不持久化新 PPP，也不重新运行词头识别。\n\n"
             "保护：Layout 白化比 PPP 自动插图更保守。小尺寸候选直接忽略；接近大字头尺寸且近方形的候选也不会白化，"
             "避免把大号单字/大字头误当成插图。关闭时完全保持原有 Layout 流程。"
         ),
@@ -314,12 +352,13 @@ SETTING_HELP = {
         "body_indent": "作用：普通画线把它作为 VB.NET 原版【正文缩进】先验。界面按原图宽度百分比输入，后台换算为原图像素后用于二维墨迹确认和栏左跟踪。\n\n调整：应接近释义正文相对词头栏左缘的真实缩进。过小会让二维确认范围不足；过大则会引入更多上下邻行墨迹，但候选锚点仍受【微调判距 < 正文缩进】约束。",
         "character_height": "作用：项目的典型单行字高。界面按原图高度百分比显示和输入，后台换算为原图像素；普通画线、OCR 行距/空白判断、横线 Y 精修和部分 CJK 视觉逻辑都以它作为尺度基准。\n\n调整：应接近正文常规印刷行高，而不是某个特别大的词头字高。",
         "row_padding": "作用：典型行周围的额外留白尺度。界面按原图高度百分比输入，后台换算为原图像素后参与普通画线行盒、词条单行框高度以及 OCR 词头前空白/分隔位置等计算。\n\n调整：增大可给文字上下更多安全空间，但过大会让相邻行更容易重叠/合并；过小则可能让横线或单行切图贴字过紧。应和【典型行高】一起校准。",
-        "right_ratio": "作用：词条单行矩形向右覆盖当前栏宽的百分比；当前实现会限制在 1%–100%。它主要影响词条矩形/单行切图的水平覆盖，不决定 OCR 是否把某行识别为词头。\n\n调整：减小可避免把过多释义或邻近内容纳入单行框；增大可保留更完整的同行上下文。它属于历史兼容参数，目前不在设置中心常用分组中，最终导出范围仍应以【切图设置】为准。",
+        "right_ratio": "向右比例%：控制主画布词头横线及辅助线的显示/点击长度；默认100%，范围1–100%。不改变裁图宽度。",
+        "crop_width_percent": "切图宽度(%栏)：控制画线行、未画线行及OCR单行裁剪；默认100%，范围1–100%。旧项目继承原裁图比例，不影响横线显示。",
         "horizontal_tolerance": "作用：严格对应 VB.NET Draw_Auto 的【微调判距】。界面按原图宽度百分比输入，后台换算为原图像素；普通画线在每个原图 Y 上，从当前动态栏左 LX(y) 开始向正文方向扫描到该距离。\n\n调整：数值太小会漏掉略微右移的真实词头，太大则会把正文起笔纳入锚点通道。旧项目保存的像素值会在界面中按当前原图宽度自动换算为百分比。",
         "analysis_threshold_mode": "作用：控制版面检测、栏位分析和倾斜/弯曲跟踪时如何把灰度转成墨迹。普通画线的最终词头锚点为保持同一本词典跨页稳定，重新使用独立的【词头锚点黑度阈值】；因此 auto/Otsu/adaptive 不再替代这个锚点门槛。\n\n选择：版面底色正常时保持 auto；阴影或书脊亮度明显不均时可试 adaptive。它主要影响版面几何，不应再拿来补偿普通词头误检。",
         "darkness_threshold": "作用：普通画线恢复 VB.NET 的固定词头黑色锚点门槛。RGB 和低于该值的像素才有资格成为栏左词头起点；默认 300 相当于灰度约 100。这个门槛跨页固定，不随每页 Otsu 分布漂移。\n\n调整：提高可接受更浅的印刷，但也更容易让灰噪声成为锚点；降低更严格。它只负责找到词头起点，随后还必须通过二维【候选区域白度上限】确认。",
         "dark_area_percent": "作用：对应 VB.NET IsPoint。找到栏左黑色锚点后，在原图上检查向正文方向【正文缩进 × 2×正文缩进】的二维区域，按原 VB 分母规则计算平均亮度；高于该百分比就拒绝。默认 90%。\n\n这一步与栏左锚点是两个独立门：前者限制起点位置，IsPoint 再确认附近确实存在一块词头文字。",
-        "ordinary_right_divisor": "作用：这是恢复出来的 VB.NET【向右比例 1/x】，只服务普通画线的横向白带分析，和当前【向右比例 %】词条框宽度完全分离。实际分析宽度约为 单栏宽 / 本值 × 0.98；默认 1.0，即检查接近整栏的 98%。\n\n值越大，Y 分隔判断看的横向范围越窄。不要用它调词条切图宽度。",
+        "ordinary_right_divisor": "作用：这是恢复出来的 VB.NET【向右比例 1/x】，只服务普通画线的横向白带分析，和【切图宽度(%栏)】词条框宽度完全分离。实际分析宽度约为 单栏宽 / 本值 × 0.98；默认 1.0，即检查接近整栏的 98%。\n\n值越大，Y 分隔判断看的横向范围越窄。不要用它调词条切图宽度。",
         "physical_row_projection_width_percent": (
             "作用：控制 Layout 重建物理行前，对每栏左侧进行墨迹行投影的采样宽度，"
             "单位为当前栏宽的百分比。范围 10–100%，默认 42%，旧项目保持原算法行为。"
@@ -357,12 +396,7 @@ SETTING_HELP = {
         "paddle_header_rule_ink_ratio": "作用：在页眉搜索区逐行计算黑色墨迹占比，达到该比例的行才有资格被视为贯穿式页眉横线。当前实现会把输入限制在合理范围后使用。\n\n调整：提高更严格，需要更长/更实的横线；降低可识别断裂或浅色横线，但也更容易把文字行误判为横线。只有【自动忽略页眉横线以上】开启时才有意义。",
         "paddle_header_rule_margin": "作用：识别到页眉横线后，再向正文方向额外留出的安全距离，单位为原图像素。该值不再按页面宽度缩放。\n\n调整：增大可避免页眉残留，但可能吃掉第一条正文词头；减小则更贴近横线。",
         "paddle_pos_search_chars": "作用：lemma 提取后，语法解析在其后的多长文本范围内寻找 POS/变形等结构提示。这样可利用近邻语法标签，同时避免把很后面的释义正文缩写误当词头证据。\n\n调整：长词头、长性别变体或 POS 距离较远时可适当增大；过大可能在定义正文里误命中缩写。存在活动 Dictionary Profile 时，POS 标签集合通常由 Profile 的 pos_labels 决定。",
-        "paddle_separator_search_ratio": "作用：OCR 粗定位词头 Y 后，以典型行高为尺度，在其附近上下搜索更合理的空白带/分隔位置，从而把横线从文字框位置精修到视觉上的行间空白。\n\n调整：增大搜索更宽，能修正较大的 OCR Y 偏差，但更可能跳到相邻行；减小更保守。只有【自动精修横线 Y】开启时才直接影响结果。",
-        "paddle_separator_band_radius": "作用：横线 Y 精修时，对局部墨迹/空白曲线做平滑的半径，单位为原图像素。该值不再使用 1400px 参考宽度。\n\n调整：增大更平滑但可能抹掉窄空白带；减小更敏感但更受噪声影响。",
-        "paddle_separator_safety_px": "作用：OCR 图像边界候选搜索中的安全距离，单位为原图像素。该字段并不是普通 Layout 逐条墨迹谷精修的统一安全距离，也不能保证最终横线绝不穿字；普通画线后续还可能进行独立的 CJK 坐标修正。\n\n调整：文字被线贴住/穿过时增大；横线与词头间距明显过大时减小。",
-        "paddle_separator_roi_width_ratio": "作用：横线 Y 精修时，只分析当前栏左侧一定百分比的横向区域，而不是整栏释义。这样可减少右侧长定义、插图或其他墨迹干扰。\n\n调整：减小更聚焦词头附近；太小可能只看到少量字符而不稳定。增大提供更多墨迹统计，但正文干扰也增加。",
-        "separator_y_max_shift_ratio": "限制普通画线 Layout 逐条横线精修后相对粗定位的最大移动幅度，单位是典型行高的倍数，默认 0.45。设小可减少跳到相邻行，设大允许修正更明显的初始定位误差。仅影响 Layout 逐条精修的位移上限，不控制其他后处理的 Y 调整。\n\n建议保持默认并使用逐条诊断核对精修前后坐标，修改前请保留 PDIC 基准文件。",
-        "paddle_separator_column_margin": "作用：横线精修分析时，从栏最左边缘跳过一小段区域，避免栏边线、装订阴影、竖直装饰线被误当作文字墨迹。单位为原图像素，不按页面宽度缩放。\n\n调整：存在明显栏线/黑边时可增大；过大会跳过真正贴边的词头。",
+        **REFINEMENT_SETTING_HELP,
         "paddle_tesseract_psm": "作用：Tesseract 对照 OCR 的 Page Segmentation Mode。当前词头候选带常见 PSM 6（单一均匀文本块）与 PSM 4（单栏但行/字号更灵活）；若开启【自动比较 PSM 4/6】，程序会自行比较，不必手动固定。\n\n调整：只有 Tesseract 对照结果明显分行错误且自动比较关闭时才改。它不影响 PaddleOCR。",
         "paddle_lens_language": "Google Lens OCR 语言自动跟随【词头 OCR 语言】，不再单独配置。Profile 或 OCR 语言变化时会同步更新。",
         "paddle_lens_timeout": "作用：一次 Google Lens 网络 OCR 最长等待时间。超时后该次 Lens 结果会失败/缺失，但本地 Paddle/Tesseract 流程仍可继续。\n\n调整：网络慢而频繁超时时可增大；过大则在服务不可达时等待更久。Lens 是可选网络依赖，不建议用超长超时掩盖网络配置问题。",
@@ -594,6 +628,11 @@ SETTING_HELP_IMAGES = {
     }
 
 SETTING_CHOICES = {
+        "ref_box_action_position": {
+            "上方靠右（默认）": "above_right",
+            "上方靠左": "above_left",
+            "右侧": "right_side",
+        },
         "analysis_denoise_strength": {"关闭": "off", "弱": "weak", "自动": "auto", "强": "strong"},
         "analysis_threshold_mode": {
             "自动（推荐，等同 Otsu）": "auto",
@@ -610,9 +649,17 @@ SETTING_CHOICES = {
     }
 
 CHECK_HELP = {
+    "ref_box_include_guide_width": "默认关闭：自动画框紧邻引导图样。开启后将匹配图样也纳入 REF 框，宽度为 REF 默认宽度与图样实际匹配宽度之和；样本“向后”则从图样左缘开始，“向前”则向左覆盖文本并包含右侧图样。",
+    "ref_box_show": "主画布是否显示已有 REF 框。关闭只隐藏标注，不删除本地 .rbox。进入编辑模式仍会显示。",
+    "ref_box_show_text": "控制 REF OCR 独立文本标签的显示与隐藏；不影响原图 REF 定位框、已保存文字及编辑。",
+    "ref_box_delete_always_visible": "在【编辑 REF】模式下，每个 REF 都显示删除 × 按钮，即使尚未选中。关闭时仅选中的 REF 显示 ×。主界面普通浏览时不会显示可点击的删除按钮，避免误删；删除操作仍然只能单击 ×。",
+    "ref_box_font_bold": "决定 REF 框文字是否使用粗体，默认关闭。启用后只调整界面字体粗细，不会重新识别框位置或改变已保存的文字。",
+    "ref_box_font_italic": "决定 REF 框文字是否使用斜体，默认关闭。适合需要区别原书字体的标注风格；切换只改变画布显示，不影响文件数据。",
+
+    "ref_box_auto_attach": "手动新建 REF 时将框中心所在的当前页 PDIC 正文切片识别为挂靠词条；落在上页续接区或不在词条范围时保留未关联，可后续手动编辑。",
     "draw_performance_profile": "为每页及关键检测阶段记录墙钟耗时，批次结束后自动导出 Markdown、CSV 和本次设置快照。默认关闭；性能记录会产生少量磁盘写入，但不会改变 PDIC 检测结果。",
     "reuse_prepared_analysis": "实验功能：复用相同去噪强度下已经生成的分析图，避免再次进行全页去噪。默认关闭；开启后应以同批扫描页进行完整 PDIC 文件对照，不保证重复去噪与只做一次的结果完全一致。",
-    "analysis_denoise_enabled": "控制进入 Page Understanding、Layout 和普通画线的共享分析图是否进行自适应去噪。关闭时保留原始墨迹，不影响 Layout 专用去噪；如需比较，建议同一批页面复测并核对 PDIC。",
+    "analysis_denoise_enabled": "控制进入 Page Understanding、Layout 和普通画线的共享分析图是否进行自适应去噪。关闭时保留原始墨迹，不影响 Layout 专用去噪。【精修画线】仅增加按设置的插图填白，继续使用已有精修算法，不额外执行共享去噪或完整版面检测。需比较时建议用同一批页面复测核对 PDIC。",
     "layout_denoise_enabled": "单独控制可靠性融合版面检测之前的墨迹去噪。关闭后仅省去这一层清理，仍保留共享分析图的去噪设置；在污点多、细线多的词典中应比较检测准确度。",
     "layout_scale_enabled": "实验选项，根据原图最长边选择 100%、75% 或 50% 的临时版面检测图。只有下方允许的参数接受缩图估计，其余使用项目原分辨率先验；未完成 PDIC 对照前请保持关闭。",
     "layout_scale_columns": "允许 50% 或 75% 缩图版面检测更新分栏数。分栏数反映整体宏观布局，通常对缩图较稳定，因此默认勾选；复杂跨栏页面仍需检查原图的分栏结果。",
@@ -622,7 +669,7 @@ CHECK_HELP = {
     "layout_scale_manual_x": "控制是否允许缩图结果更新首栏 X。此前真实页面出现过明显的横向坐标偏移，因此默认不勾选；允许时建议逐页检查左缘及完整 PDIC 坐标。",
     "layout_scale_character_height": "控制是否允许缩图结果更新普通文字字符高度。字高会影响物理行归并、缩进和大字头判断，因此默认不勾选；优先沿用原图项目先验并核对视觉分析。",
     "layout_scale_row_padding": "控制是否允许缩图结果更新普通文字行间空白。该值直接影响词条行高和分隔位置，低分辨率更容易产生舍入偏差，默认不勾选并沿用原图项目参数。",
-    "layout_mask_illustrations_use_existing": "只有同时开启【Layout 分析前白化插图】才生效。勾选：仅读取当前页已保存的 PPP 多边形直接填白，不重新识别、不改写 PPP；PPP 缺失明确报错。不勾选：自动识别插图，把识别结果写入 PPP（保留手绘区域），并按安全规则白化。",
+    "layout_mask_illustrations_use_existing": "只有同时开启【Layout 分析前白化插图】才生效。勾选：仅读取当前页已保存的 PPP 多边形直接填白，不重新识别、不改写 PPP；普通 Layout/主动精修在 PPP 缺失时仍报错，但两种行导出会按原图正常导出。不勾选：普通 Layout 可以自动识别插图并按原规则保存 PPP；【精修画线】只在内存中检测并填白，绝不额外写 PPP（因此未勾选可能更慢）。",
     "proofreading_event_capture": "默认关闭。启用后仅将支持的人工校对操作，在 PDIC 成功保存后记录到本地项目的独立事件日志；不自动上传、不进行模型训练，普通保存和 OCR 自动画线不等于人工确认。关闭后停止记录，不删除已有日志；含词条文本的记录由用户自行保管、决定是否导出。",
     "show_illustration_labels": "开启后在主画布展示插图区域编号或标签，方便核对自动识别及手工标注的 PPP 区域。关闭仅隐藏标签，不隐藏多边形本身，也不删除 PPP 数据。",
     "illustration_label_font_bold": "插图标签使用粗体显示，适合扫描背景较复杂、细体不易看清的页面。只改变显示效果。",
@@ -631,15 +678,14 @@ CHECK_HELP = {
     "layout_mask_illustrations": (
         "作用：开启后，【普通画线】和【显示 Layout】在 Page Understanding 之前先复用自动插图检测，"
         "把足够大的插图区域仅在分析副本上填成白色，再恢复文字行、缩进和 entry/body 角色。"
-        "原始扫描图、OCR、PDIC 与切图文件都不会被修改；若不勾选复用，自动识别的插图候选会写入 PPP（保留手工区域）。\n\n"
+        "原始扫描图、OCR 和 PDIC 不会被修改；普通 Layout 在非复用模式可能持久化 PPP 候选。【精修画线】仅填白分析副本；【画线行导出】及【未画线行导出】按同一规则处理临时图片并写入新导出的 PNG，不持久化新 PPP，也不重新运行词头识别。\n\n"
         "保护：Layout 白化比 PPP 自动插图更保守。小尺寸候选直接忽略；接近大字头尺寸且近方形的候选也不会白化，"
         "避免把大号单字/大字头误当成插图。关闭时完全保持原有 Layout 流程。"
     ),
         "ordinary_auto_layout": (
-            "开启：每页【普通画线】先由当前 Layout Core 解析页面几何和最终行角色，再把所选的逐页版面字段"
-            "作为本页临时值使用；结果不会写回下一页。\n\n"
-            "当前普通画线的主路径直接消费 Layout Core 的最终 entry 行；只有 Layout 无法形成可用栏结构时，"
-            "才进入历史几何 fallback。"
+            "开启：每页【普通画线】由 Layout Core 估算几何和行角色；勾选字段作为当前页临时值，不写回项目基准。\n\n"
+            "【精修画线】也会在开启且有字段勾选时逐页测定物理栏几何（栏宽、首栏X、字高等），"
+            "只应用勾选字段；其他参数保持项目值。不重跑 OCR、词头识别或完整语义 Layout。"
         ),
         "ordinary_auto_columns": "自动版面检测后，用当前页检测出的【分栏数】临时替换项目基准值；只影响本页普通画线，不写回下一页。",
         "ordinary_auto_start_y": "自动版面检测后，用当前页检测出的【正文起始Y】临时替换项目基准值；适合页眉位置存在逐页漂移的扫描。",
@@ -666,8 +712,7 @@ CHECK_HELP = {
         ),
         "paddle_require_visual_cue": "名称是历史遗留。当前实现并不是“必须有纯视觉证据”，而是要求候选至少有一个结构或视觉 fallback cue：POS/变形/描述符/特殊符号，或字高/粗体/行前空白之一。\n\n开启可抑制只有合法字母形态、却没有任何词条特征的正文行；关闭会放宽候选门槛，除非 diagnostics 明确显示真实词头因此被拒，否则不建议关闭。",
         "paddle_require_pos_or_symbol": "开启：普通词头候选必须具有至少一个强结构提示：POS、变形、结构描述符或可作为新词条证据的特殊符号。能显著抑制栏左正文误检。\n\n关闭：允许仅靠位置/视觉分数通过，召回更高但假阳性更多。对结构化拉丁词典通常建议开启；CJK/特殊 Profile 还会有自己的专用接受逻辑。",
-        "paddle_refine_separator_y": "开启：OCR画线仍按原流程精修；普通画线则先完整执行 VB.NET 的向上白带定位，已经得到一个 VB 分隔 Y 后，才把现有局部墨迹谷算法作为最后的小范围二次修正，并限制最大移动量。它不再负责替代 VB 的初始 Y 定位。\n\n关闭：普通画线直接使用 VB 分隔 Y；OCR画线保留其未精修的粗定位。",
-        "separator_y_ink_safe_gap": "实验性横线 Y 安全检查，默认关闭。先执行现有横线精修，再在原图灰度 ROI 中核验该位置是否穿过明显墨迹；只有附近存在连续至少三行的可信白缝且位移不超过字高约四分之一时才改到更安全的 Y。不会新增或删除词头。\n\n对跨栏插图、极窄行距或无白缝的页面不强制修正。尚未做多词典真实图像对照，打开后如定位异常可随时关闭，恢复原定位行为。",
+        **REFINEMENT_CHECK_HELP,
         "paddle_compare_tesseract": (
             "开启：把 Tesseract 加入共享 OCR 通道，与 PaddleOCR 在同一图像/候选带上运行。"
             "【仅OCR】可据此比较或选择文字；【OCR画线】则把相同 OCR 证据交给成熟 parser/边界判定。\n\n"
@@ -687,6 +732,36 @@ CHECK_HELP = {
         "review_entry_font_bold": "开启后校对窗口“原词条”编辑框使用粗体；关闭为常规字重。只影响校对文字显示和字体测量，不改变原图裁图或保存内容。",
         "review_entry_font_italic": "开启后校对窗口“原词条”编辑框使用斜体；关闭为正体。只影响显示；若某字体斜体导致字符更宽，可见字符数可能略变，但词条数据不变。",
     }
+
+REF_BOX_STYLE_FIELDS = (
+    "ref_box_fill_color", "ref_box_fill_opacity",
+    "ref_box_filled_color", "ref_box_filled_opacity",
+    "ref_box_action_position",
+)
+REF_TEXT_LABEL_FIELDS = (
+    "ref_box_text_color", "ref_box_font_family", "ref_box_font_size",
+    "ref_text_label_background_color", "ref_text_label_background_opacity",
+    "ref_text_label_gap", "ref_text_label_padding",
+)
+REF_OCR_EXTRACTION_FIELDS = ("ref_ocr_extract_regex",)
+REF_TEXT_LABEL_CHECKS = (
+    ("显示 REF 文本标签", "ref_box_show_text"),
+    ("REF 文本标签字体加粗", "ref_box_font_bold"),
+    ("REF 文本标签字体斜体", "ref_box_font_italic"),
+)
+REF_BOX_GEOMETRY_FIELDS = (
+    "ref_box_width_lines", "ref_box_height_lines", "ref_match_threshold",
+    "ref_match_scale_tolerance_percent",
+)
+REF_BOX_GEOMETRY_CHECKS = (
+    ("图样宽度纳入画框", "ref_box_include_guide_width"),
+)
+
+REF_BOX_CHECKS = (
+    ("显示 REF 框", "ref_box_show"),
+    ("编辑模式中所有 REF 一直显示 ×", "ref_box_delete_always_visible"),
+    ("新框自动挂靠所在正文词条", "ref_box_auto_attach"),
+)
 
 ILLUSTRATION_DETECTION_FIELDS = (
     "illustration_detect_gray_threshold", "illustration_detect_parallel_workers",
@@ -769,7 +844,7 @@ SEPARATOR_Y_FIELDS = (
 )
 
 SEPARATOR_Y_CHECKS = (
-    ("自动精修横线 Y（普通画线与 OCR 共用）", "paddle_refine_separator_y"),
+    ("自动画线 Y 精修（手动按钮独立）", "paddle_refine_separator_y"),
     ("实验：原图白缝核验横线 Y", "separator_y_ink_safe_gap"),
 )
 

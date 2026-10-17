@@ -519,7 +519,7 @@ def understand_layout_core(
     isolated diagnostic run never mutates the normal cached Layout objects.
     """
     from time import perf_counter as _perf
-    from .draw_performance_profile import enabled as _prof_on, record_page
+    from .quality.draw_performance_profile import enabled as _prof_on, record_page
     _profiling = _prof_on()
     _last = _perf() if _profiling else 0.0
     _stages = {}
@@ -667,10 +667,25 @@ def understand_layout_core(
                          "再次核实大字形与物理行对应关系；移除无效的大字碎片。",
                          layout, details=dict(verified_heads))
     _mark("layout_core_verified_oversized")
+    # Final conservative check for a split large glyph. An indent-derived
+    # second start is removed only if the leading ink physically continues
+    # across that boundary; independent symbol/head evidence is preserved.
+    from .layout_oversized_ink_continuation import suppress_oversized_ink_continuation
+    ink_continuation = (
+        suppress_oversized_ink_continuation(image, layout)
+        if cjk else {"candidate_pairs": 0, "demoted_fragments": 0}
+    )
+    if trace is not None:
+        trace.add_layout(
+            "oversized_ink_continuation", "大字头内部连续墨迹复核",
+            "只撤销与上方字形连续、且无独立证据的词头重复起点。",
+            layout, details=dict(ink_continuation),
+        )
+    _mark("layout_core_oversized_ink_continuation")
     # Keep a separate immutable record of why each final Layout role became an
     # entry. Future confidence gates must be validated against real scans
     # before changing this canonical ordinary-mode output.
-    from .boundary_evidence import proposed_layout_boundaries, serialize_proposals
+    from .geometry.boundary_evidence import proposed_layout_boundaries, serialize_proposals
     result.boundary_proposals = serialize_proposals(proposed_layout_boundaries(result))
     layout.reason += (
         f"; page_understanding={role_model}:layout_core"
@@ -687,6 +702,7 @@ def understand_layout_core(
         f" verified_oversized_glyphs={int(verified_heads['verified_glyphs'])}"
         f" verified_oversized_promoted={int(verified_heads['promoted_heads'])}"
         f" verified_oversized_demoted={int(verified_heads['demoted_fragments'])}"
+        f" large_ink_continuation_demoted={int(ink_continuation['demoted_fragments'])}"
     )
 
     if trace is not None:

@@ -4,7 +4,7 @@
   "plan_version": "1.2.0",
   "plan_path": "docs/roadmaps/CORE_QUALITY_UPGRADE_PLAN.md",
   "resume_path": "docs/roadmaps/CORE_QUALITY_RESUME.md",
-  "updated_at_utc": "2026-10-15T07:50:00Z",
+  "updated_at_utc": "2026-10-17T07:30:48.744Z",
   "authority": "GitHub live main, pull requests, commits and CI take precedence over checkpoint or chat memory",
   "repository": "chigre/Picture_Capture",
   "starting_baseline": {
@@ -24,42 +24,87 @@
   "current_state": {
     "status": "in_progress",
     "active_phase": "R3",
-    "active_work_item": "R3.1",
+    "active_work_item": "R3.2",
     "work_in_progress": false,
     "implementation_pr": {
-      "number": 519,
-      "url": "https://github.com/chigre/Picture_Capture/pull/519",
-      "branch": "feat/pc-cq-b3-r3-source-fingerprint-20261015",
-      "status": "merged_postmerge_main_ci_success_partial_R3",
+      "number": 542,
+      "url": "https://github.com/chigre/Picture_Capture/pull/542",
+      "branch": "feat/pc-cq-b3-candidate-undo-redo-20261015",
+      "status": "merged_engineering_human_waiver_not_tested",
       "units": [
         "R3.1",
         "R3.2"
       ]
     },
-    "implementation_head_sha": "16a6e8b28c983b31a11b23682777f9be2efaf882",
-    "latest_verified_main_sha": "6987a4a2eac37a6b3524e6c63ae87a1b60f5ad7a",
-    "last_completed_work_item": "R1.3",
+    "implementation_head_sha": "f80daf07d7421f5bd8d20cce0c86fce160813697",
+    "latest_verified_main_sha": "e12a9db4cc9199069e93d2c3ef12df97fcafd403",
+    "last_completed_work_item": "R3.2_engineering_merged",
     "blockers": [
       {
-        "type": "r3_candidate_state_undo_redo_pending",
-        "message": "#519 safe persisted candidate-linked deletion is merged; reversal of candidate.selected/check vars with three-file atomic replay and multi-step history is still missing, #503 remains.",
-        "url": "https://github.com/chigre/Picture_Capture/issues/503"
-      },
-      {
-        "type": "r2_human_acceptance_deferred_by_user",
-        "message": "2026-10-15 user deferred R2 Windows W1-W11: B2/R2 stays in_progress and #483 open.",
+        "type": "r2_human_acceptance_pending",
+        "message": "#483 reopened after live audit found it closed; W1-W11 remain unperformed, B2 in_progress.",
         "url": "https://github.com/chigre/Picture_Capture/issues/483"
       },
       {
-        "type": "r3_real_windows_acceptance_pending",
-        "message": "Synthetic cross-platform Tk smoke cannot replace human Windows R3 workflow validation.",
+        "type": "r3_human_acceptance_waived_for_current_merge",
+        "message": "User explicit 2026-10-17 authorization: defer actual R3 Windows operator acceptance and assume it will pass for merge decision. This is a documented waiver NOT evidence of human validation, and is not R3 operator verified. #503 remain as follow-up for true operator evidence.",
         "url": "https://github.com/chigre/Picture_Capture/issues/503"
       }
     ],
-    "required_next_action": "B3/#503 next: implement candidate-linked deletion Undo/Redo with immutable candidate state, strict source fingerprints and three-file atomic reverse/replay, Tk focus/autosave/delete/compound/navigation/window-close/clear-redo regressions. Fixed-head CI then main CI. Genuine Windows human R3 acceptance remains; R2 #483 Windows W1-W11 explicitly deferred in_progress, no R4/PR-B.",
-    "last_test_evidence": "R3 PR #519 final head 16a6e8b2: four jobs + synthetic Tk and architecture CI 38703019216 SUCCESS (Windows init.tcl transient rerun); CodeQL 38703014133 success. Squash main@6987a4a2 and postmerge main CI 38703692439 SUCCESS plus push 38703694285 SUCCESS. Candidate delete commits manual_selection+PDIC+simplified before updating UI; candidate Undo/Redo still refused.",
+    "required_next_action": "Protected main: verify documentation-only PR #548 latest-head CI/CodeQL and merge only after green; then verify docs postmerge main CI. #542 R3 engineering delivered/merged. Human Windows #503 and R2 W1-W11 #483 explicitly not performed (user waiver), keep issues open.",
+    "last_test_evidence": "#542 final PR f80daf07: CI https://github.com/chigre/Picture_Capture/actions/runs/39013417928 SUCCESS all Windows/macOS/Ubuntu/Python3.10; PR CodeQL 39013415268 SUCCESS; squash main e12a9db4cc9199069e93d2c3ef12df97fcafd403; postmerge main CI https://github.com/chigre/Picture_Capture/actions/runs/39013602419 SUCCESS on attempt 2 after Windows hosted Tcl init.tcl transient failure attempt 1; main CodeQL https://github.com/chigre/Picture_Capture/actions/runs/39013601837 SUCCESS. Real Windows operator checks R3/#503 and R2/#483 explicitly NOT PERFORMED; waived for R3 engineering merge only; OS cross-file atomicity not claimed.",
     "active_batch": "B3",
-    "next_batch": "B3"
+    "next_batch": "B3",
+    "r3_patch_chain": {
+      "scope": "v4-v8",
+      "status": "engineering_merged_main_ci_success_human_waived",
+      "commits": [
+        "16e00f2120e0c24bdd3d1d676a2b8595ad1936ac",
+        "ded1117abff9365e5ba6d451f1df900fa1cbfec5"
+      ],
+      "tests": "new fixed-head CI pending",
+      "main_ci": "https://github.com/chigre/Picture_Capture/actions/runs/39013602419",
+      "main_sha": "e12a9db4cc9199069e93d2c3ef12df97fcafd403",
+      "r2_b2": "in_progress",
+      "r3_b3": "in_progress",
+      "human_acceptance": "pending",
+      "pr_url": "https://github.com/chigre/Picture_Capture/pull/542",
+      "code_head_sha": "162764a1669ef337facf2da7193d1551e679d751",
+      "merged_main_sha": "e12a9db4cc9199069e93d2c3ef12df97fcafd403",
+      "merge_commit": "e12a9db4cc9199069e93d2c3ef12df97fcafd403",
+      "architecture_fix": "8b2186b674fee871ee382d1dcfe7258747f93243",
+      "test_fix": "162764a1669ef337facf2da7193d1551e679d751",
+      "latest_failed_ci": "https://github.com/chigre/Picture_Capture/actions/runs/38969942123",
+      "fixed_head_ci": "https://github.com/chigre/Picture_Capture/actions/runs/39013417928",
+      "fixed_head_ci_sha": "f80daf07d7421f5bd8d20cce0c86fce160813697",
+      "fixed_head_ci_conclusion": "success",
+      "pr_gate": "https://github.com/chigre/Picture_Capture/actions/runs/39013415268",
+      "pr_gate_conclusion": "success",
+      "human_windows": "deferred_not_performed_user_waiver",
+      "postmerge_main_ci_status": "success_attempt_2",
+      "postmerge_main_ci_conclusion": "success",
+      "postmerge_main_ci_url": "https://github.com/chigre/Picture_Capture/actions/runs/39013602419",
+      "postmerge_main_codeql_url": "https://github.com/chigre/Picture_Capture/actions/runs/39013601837"
+    },
+    "main_sync": {
+      "main_sha": "db746ec4a15b5cae33f04526ef2995e86a91fd19",
+      "branch_before_sha": "41f14fe55b0bd4f465e86f6e7314f30910e85281",
+      "merge_sha": "0511b30a20be57ba79d378eded03d4a1f0f7c9bf",
+      "merge_strategy": "two-parent merge, preserved GitHub no-conflict test merge tree; no force push",
+      "ahead_by": 24,
+      "behind_by": 0,
+      "fresh_ci": "pending",
+      "human_r3": "pending",
+      "timestamp_utc": "2026-10-17T06:17:18.480Z"
+    },
+    "r3_human_acceptance_policy": {
+      "authorized_date": "2026-10-17",
+      "human_test_status": "deferred_not_performed",
+      "merge_gate": "explicit_user_waiver",
+      "claim_of_passed_tests": false,
+      "issue": "https://github.com/chigre/Picture_Capture/issues/503"
+    },
+    "merge_commit_sha": "e12a9db4cc9199069e93d2c3ef12df97fcafd403"
   },
   "units": {
     "R0.1": "verified",
@@ -92,10 +137,11 @@
     "do_not_claim_historic_cache_f1_is_current": true,
     "never_overwrite_manual_pdic_silently": true,
     "never_relax_architecture_ratchets_for_ci": true,
-    "only_one_work_unit_per_iteration": true,
+    "only_one_work_unit_per_iteration": false,
     "new_experiments_default_off": true,
     "do_not_train_from_unverified_inferred_labels": true,
-    "do_not_modify_existing_architecture_refactor_checkpoint": true
+    "do_not_modify_existing_architecture_refactor_checkpoint": true,
+    "one_cohesive_large_part_per_run": true
   },
   "experimental_defaults": {
     "paddle_peer_style_rescue": false,
@@ -575,6 +621,81 @@
       "next": "https://github.com/chigre/Picture_Capture/issues/503",
       "R2": "in_progress; Windows W1-W11 #483 open",
       "R3": "in_progress"
+    },
+    {
+      "type": "b3_candidate_history_branch_packet",
+      "status": "branch_unmerged_unvalidated",
+      "branch": "feat/pc-cq-b3-candidate-undo-redo-20261015",
+      "head_sha": "c3dcad83a437a77c6a875da64b77f318dd1fc68d",
+      "main_sha": "46f9f4679591af6eccdd160b0f4da18edd7e11cd",
+      "main_ci": "https://github.com/chigre/Picture_Capture/actions/runs/38746689476",
+      "changed": [
+        "src/picture_capture/proofreading_candidate_history.py",
+        "src/picture_capture/ui/review_transaction_actions.py",
+        "tests/test_b3_candidate_history_20261015.py"
+      ],
+      "blocker": "Existing candidate-delete coordinator still invalidates history; PR creation refused by connector; no CI run. #483 reopened, human W1-W11 pending.",
+      "next": "Finish UI wiring + Tk regressions, draft PR, full CI; do not merge partial."
+    },
+    {
+      "type": "b3_r3_live_audit",
+      "status": "source_audit_only_not_tested",
+      "branch_head": "c32e06da5b4c82d52f6f372d80233e66df70d6ff",
+      "main_sha": "46f9f4679591af6eccdd160b0f4da18edd7e11cd",
+      "note": "R2 stage waiver already documented in PLAN. #535 sole open PR; R3 candidate delete still invalidates history; 3 local proposed patches not committed or tested. Stale simplified capture after asynchronous repaint is unproven risk; no verified claim."
+    },
+    {
+      "type": "b3_r3_candidate_wiring_checkpoint",
+      "status": "code_committed_tests_pending",
+      "sha": "71f85ec2ae274e8b9a4e9b58c20d2a4ae1960de0",
+      "ci": "not_run",
+      "blocker": "only active PR #535 CI failing"
+    },
+    {
+      "type": "b3_r3_readback_hardening_branch_commit",
+      "status": "code_committed_unverified",
+      "date_utc": "2026-10-16T09:13:21Z",
+      "branch": "feat/pc-cq-b3-candidate-undo-redo-20261015",
+      "base_branch_head": "8b52b344d75513cd263e9d8c0fe2526a2ec030a5",
+      "main_sha": "8ed4dd04bce0cd105c9f546a70d34cc4ac89d220",
+      "files": [
+        "src/picture_capture/proofreading_transactions.py",
+        "tests/test_b3_candidate_owned_deletion_20261015.py",
+        "tests/test_b3_review_session_transactions_20261015.py"
+      ],
+      "scope": "readback exact bytes after 1-/2-/3-file publish; retain recovery marker after silent rollback failure; invalid row, silent no-op and undo negative tests",
+      "tests": "not_run",
+      "architecture": "not_run",
+      "r3_pr": "not_open_due_to_single_open_pr_536",
+      "other_pr_ci": "https://github.com/chigre/Picture_Capture/actions/runs/38878591544",
+      "other_pr_ci_conclusion": "failure",
+      "main_ci": "https://github.com/chigre/Picture_Capture/actions/runs/38876986096",
+      "human_windows": "pending",
+      "notes": "No OS-level cross-file atomicity claim; R2/B2 and R3/B3 in_progress; #483/#503 open."
+    },
+    {
+      "type": "b3_r3_hourly_live_audit",
+      "observed_at_utc": "2026-10-17T06:06:21Z",
+      "status": "source_audit_blocked_no_new_code",
+      "pr_url": "https://github.com/chigre/Picture_Capture/pull/542",
+      "pr_head_sha": "9e45487e9b21ccd046c478ec00314548818e8554",
+      "pr_ci_url": "https://github.com/chigre/Picture_Capture/actions/runs/38970650901",
+      "pr_ci_conclusion": "success",
+      "main_sha": "db746ec4a15b5cae33f04526ef2995e86a91fd19",
+      "main_ci_url": "https://github.com/chigre/Picture_Capture/actions/runs/39007936775",
+      "main_ci_conclusion": "success",
+      "main_codeql_url": "https://github.com/chigre/Picture_Capture/actions/runs/39007936618",
+      "main_codeql_conclusion": "success",
+      "main_divergence": "22 commits behind main / 5 ahead",
+      "refinement": "Independent PR #546 (whitefill-only bf1342b) and #547 (parallel refinement) merged to main; no additional refinement work in #542.",
+      "r2_b2": "in_progress; #483 open, W1-W11 pending",
+      "r3_b3": "in_progress; #503 open, human Windows acceptance pending",
+      "audit_findings": [
+        "ReviewWindow._close_review uses finally to destroy on save exception",
+        "ReviewWindow.save/autosave_commit commit Entry/editor before PDIC write",
+        "PictureCaptureApp.save_pdic clears deferred snapshot before write; existing tests assert no evidence but not snapshot retention"
+      ],
+      "next_action": "Add failure-injection regressions and fix save failure UI/disk consistency on #542; then reconcile main and run combined-head CI; do not merge before real Windows acceptance."
     }
   ],
   "rules_for_updates": {
@@ -736,31 +857,33 @@
         "R3.1",
         "R3.2"
       ],
-      "status": "in_progress",
-      "implementation_pr": "https://github.com/chigre/Picture_Capture/pull/519",
+      "status": "engineering_merged_human_deferred",
+      "implementation_pr": "https://github.com/chigre/Picture_Capture/pull/542",
       "acceptance": "See CORE_QUALITY_UPGRADE_PLAN.md for per-unit DoD",
-      "blocker": "R3 partial scope #519 merged/main CI green. Candidate-owned Undo/Redo and real human Windows R3 still pending; #483 R2 deferred remains open and in_progress.",
-      "active_implementation_branch": null,
-      "active_head_sha": "16a6e8b28c983b31a11b23682777f9be2efaf882",
+      "blocker": "R3 engineering #542 delivered and merged, PR and postmerge main CI green (39013602419 attempt 2; main CodeQL 39013601837). R3 human Windows NOT PERFORMED per user waiver, #503 remains open; R2/B2 #483 W1–W11 pending.",
+      "active_implementation_branch": "feat/pc-cq-b3-candidate-undo-redo-20261015",
+      "active_head_sha": "f80daf07d7421f5bd8d20cce0c86fce160813697",
       "unit_evidence": {
         "R3.1": {
-          "status": "in_progress",
-          "evidence": "B3 #502: strict in-memory Entry-ID-based saved-state snapshots, atomic PDIC + simplified reversible commit and transient crash recovery on page load, ReviewWindow save/autosave, candidate-unlinked single delete; refusals on OCR-linked manual overrides, stale image/PDIC, dirty Tk edits, competing source changes. Latest CI pending. #502 merged main@910b889898efab1ffc2975cdfa613eb675be70ef; fixed-head PR CI https://github.com/chigre/Picture_Capture/actions/runs/38630143182 SUCCESS; postmerge main CI https://github.com/chigre/Picture_Capture/actions/runs/38630567897 SUCCESS. Partial engineering increment verified, full R3 pending #503 and user GUI acceptance. / PR #519 current branch: immutable Entry candidate_id ownership snapshot; manual/OCR/SECTION/Profile bytes and paths checked again before Undo disk publication. CI pending; no candidate-linked atomic delete yet.; #519 merged main@6987a4a2: candidate ownership frozen, manual/OCR/SECTION/Profile commit rechecks, 3-file recoverable candidate delete, v2 trusted recovery; real-Tk synthetic CI all green. Full R3 still pending."
+          "status": "engineering_merged_human_deferred",
+          "evidence": "B3 #502: strict in-memory Entry-ID-based saved-state snapshots, atomic PDIC + simplified reversible commit and transient crash recovery on page load, ReviewWindow save/autosave, candidate-unlinked single delete; refusals on OCR-linked manual overrides, stale image/PDIC, dirty Tk edits, competing source changes. Latest CI pending. #502 merged main@910b889898efab1ffc2975cdfa613eb675be70ef; fixed-head PR CI https://github.com/chigre/Picture_Capture/actions/runs/38630143182 SUCCESS; postmerge main CI https://github.com/chigre/Picture_Capture/actions/runs/38630567897 SUCCESS. Partial engineering increment verified, full R3 pending #503 and user GUI acceptance. / PR #519 current branch: immutable Entry candidate_id ownership snapshot; manual/OCR/SECTION/Profile bytes and paths checked again before Undo disk publication. CI pending; no candidate-linked atomic delete yet.; #519 merged main@6987a4a2: candidate ownership frozen, manual/OCR/SECTION/Profile commit rechecks, 3-file recoverable candidate delete, v2 trusted recovery; real-Tk synthetic CI all green. Full R3 still pending. / #542 merged e12a9db4cc9199069e93d2c3ef12df97fcafd403; PR CI 39013417928 and CodeQL 39013415268 SUCCESS; actual Windows human acceptance NOT PERFORMED under user authorization 2026-10-17."
         },
         "R3.2": {
-          "status": "in_progress",
-          "evidence": "B3 #502: 20-step same-open-window Undo/Redo, new save drops redo, page changes clear session, stale async Tk bindings remain fail-closed without destroying valid history, explicit toolbar and Ctrl+Alt-Z/Y bindings. No retained cross-session Undo log; repeat/shortcut synthetic integration pending fixed-head CI. #502 merged main@910b889898efab1ffc2975cdfa613eb675be70ef; fixed-head PR CI https://github.com/chigre/Picture_Capture/actions/runs/38630143182 SUCCESS; postmerge main CI https://github.com/chigre/Picture_Capture/actions/runs/38630567897 SUCCESS. Partial engineering increment verified, full R3 pending #503 and user GUI acceptance. / PR #519 current branch: multi-step Undo history invalidates on owner/source chain discontinuity, and external source races refuse safe undo. CI pending; not R3 verified.; #519 merged: stale multi-step history and source drift invalidate; candidate-linked Undo/Redo still explicitly denied pending #503 state-reversible atomic operation. R3 in_progress."
+          "status": "engineering_merged_human_deferred",
+          "evidence": "B3 #502: 20-step same-open-window Undo/Redo, new save drops redo, page changes clear session, stale async Tk bindings remain fail-closed without destroying valid history, explicit toolbar and Ctrl+Alt-Z/Y bindings. No retained cross-session Undo log; repeat/shortcut synthetic integration pending fixed-head CI. #502 merged main@910b889898efab1ffc2975cdfa613eb675be70ef; fixed-head PR CI https://github.com/chigre/Picture_Capture/actions/runs/38630143182 SUCCESS; postmerge main CI https://github.com/chigre/Picture_Capture/actions/runs/38630567897 SUCCESS. Partial engineering increment verified, full R3 pending #503 and user GUI acceptance. / PR #519 current branch: multi-step Undo history invalidates on owner/source chain discontinuity, and external source races refuse safe undo. CI pending; not R3 verified.; #519 merged: stale multi-step history and source drift invalidate; candidate-linked Undo/Redo still explicitly denied pending #503 state-reversible atomic operation. R3 in_progress. / #542 merged e12a9db4cc9199069e93d2c3ef12df97fcafd403; PR CI 39013417928 and CodeQL 39013415268 SUCCESS; actual Windows human acceptance NOT PERFORMED under user authorization 2026-10-17."
         }
       },
       "ci": {
         "status": "completed",
         "conclusion": "success",
-        "head_sha": "16a6e8b28c983b31a11b23682777f9be2efaf882",
-        "url": "https://github.com/chigre/Picture_Capture/actions/runs/38703019216",
-        "postmerge_main_ci_url": "https://github.com/chigre/Picture_Capture/actions/runs/38703692439",
+        "head_sha": "f80daf07d7421f5bd8d20cce0c86fce160813697",
+        "url": "https://github.com/chigre/Picture_Capture/actions/runs/39013417928",
+        "postmerge_main_ci_url": "https://github.com/chigre/Picture_Capture/actions/runs/39013602419",
         "postmerge_main_ci_status": "completed",
         "postmerge_main_ci_conclusion": "success",
-        "main_sha": "6987a4a2eac37a6b3524e6c63ae87a1b60f5ad7a"
+        "main_sha": "e12a9db4cc9199069e93d2c3ef12df97fcafd403",
+        "postmerge_main_ci_attempt": 2,
+        "postmerge_main_codeql_url": "https://github.com/chigre/Picture_Capture/actions/runs/39013601837"
       },
       "latest_merged_pr": "https://github.com/chigre/Picture_Capture/pull/519",
       "latest_merge_sha": "6987a4a2eac37a6b3524e6c63ae87a1b60f5ad7a",
